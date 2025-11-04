@@ -908,6 +908,7 @@ pub(crate) fn build_specs(
     }
 
     // Always register shell aliases so older prompts remain compatible.
+    // ShellHandler 内部已调用 unified_exec，通过 PTYService 执行
     builder.register_handler("shell", shell_handler.clone());
     builder.register_handler("container.exec", shell_handler.clone());
     builder.register_handler("local_shell", shell_handler);

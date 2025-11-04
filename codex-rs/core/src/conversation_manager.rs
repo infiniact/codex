@@ -11,6 +11,7 @@ use crate::protocol::Event;
 use crate::protocol::EventMsg;
 use crate::protocol::SessionConfiguredEvent;
 use crate::rollout::RolloutRecorder;
+use crate::unified_exec::PtyServiceBridge;
 use codex_protocol::ConversationId;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ResponseItem;
@@ -36,14 +37,65 @@ pub struct ConversationManager {
     conversations: Arc<RwLock<HashMap<ConversationId, Arc<CodexConversation>>>>,
     auth_manager: Arc<AuthManager>,
     session_source: SessionSource,
+    /// 可选的 PtyService 桥接器，用于统一的命令执行（支持运行时修改）
+    pty_bridge: Arc<RwLock<Option<Arc<dyn PtyServiceBridge>>>>,
 }
 
 impl ConversationManager {
+    /// 创建新的对话管理器
+    ///
+    /// 使用默认配置创建对话管理器，不包含 PtyService 桥接器
+    ///
+    /// # 参数
+    ///
+    /// - `auth_manager`: 认证管理器
+    /// - `session_source`: 会话来源
     pub fn new(auth_manager: Arc<AuthManager>, session_source: SessionSource) -> Self {
         Self {
             conversations: Arc::new(RwLock::new(HashMap::new())),
             auth_manager,
             session_source,
+            pty_bridge: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// 创建带有 PtyService 桥接器的对话管理器
+    ///
+    /// 创建对话管理器并配置 PtyService 桥接器，用于执行命令时
+    /// 使用外部 PTY 服务而不是默认的 portable-pty 后端
+    ///
+    /// # 参数
+    ///
+    /// - `auth_manager`: 认证管理器
+    /// - `session_source`: 会话来源
+    /// - `pty_bridge`: PtyService 桥接器实现
+    ///
+    /// # 示例
+    ///
+    /// ```rust,no_run
+    /// use std::sync::Arc;
+    /// use codex_rs::conversation_manager::ConversationManager;
+    /// use codex_rs::AuthManager;
+    /// use codex_protocol::protocol::SessionSource;
+    ///
+    /// let auth_manager = Arc::new(AuthManager::new());
+    /// let pty_bridge = Arc::new(MyPtyServiceBridge::new());
+    /// let manager = ConversationManager::new_with_pty_bridge(
+    ///     auth_manager,
+    ///     SessionSource::Cli,
+    ///     pty_bridge,
+    /// );
+    /// ```
+    pub fn new_with_pty_bridge(
+        auth_manager: Arc<AuthManager>,
+        session_source: SessionSource,
+        pty_bridge: Arc<dyn PtyServiceBridge>
+    ) -> Self {
+        Self {
+            conversations: Arc::new(RwLock::new(HashMap::new())),
+            auth_manager,
+            session_source,
+            pty_bridge: Arc::new(RwLock::new(Some(pty_bridge))),
         }
     }
 
@@ -56,6 +108,72 @@ impl ConversationManager {
         )
     }
 
+    /// 设置 PtyService 桥接器（异步版本）
+    ///
+    /// 允许在创建 ConversationManager 后设置 PtyServiceBridge。
+    /// 设置后，所有新创建的会话都将使用此桥接器进行命令执行。
+    ///
+    /// # 参数
+    ///
+    /// - `pty_bridge`: PtyService 桥接器实现
+    pub async fn set_pty_bridge(&self, pty_bridge: Arc<dyn PtyServiceBridge>) {
+        let mut bridge = self.pty_bridge.write().await;
+        *bridge = Some(pty_bridge);
+    }
+
+    /// 设置 PtyService 桥接器（同步版本）
+    ///
+    /// 这是 `set_pty_bridge` 的同步版本，用于在非异步上下文中设置桥接器。
+    /// 注意：此方法会阻塞当前线程直到获取写锁。
+    ///
+    /// # 参数
+    ///
+    /// - `pty_bridge`: PtyService 桥接器实现
+    pub fn set_pty_bridge_blocking(&self, pty_bridge: Arc<dyn PtyServiceBridge>) {
+        let mut bridge = self.pty_bridge.blocking_write();
+        *bridge = Some(pty_bridge);
+    }
+
+    /// 获取当前的 PtyService 桥接器
+    ///
+    /// 返回当前设置的 PtyService 桥接器
+    ///
+    /// # 返回值
+    ///
+    /// - `Some(bridge)`: 如果已设置桥接器
+    /// - `None`: 如果未设置桥接器
+    pub async fn get_pty_bridge(&self) -> Option<Arc<dyn PtyServiceBridge>> {
+        self.pty_bridge.read().await.clone()
+    }
+
+    /// 设置会话的连接 ID
+    ///
+    /// 为特定会话设置关联的连接 ID，用于在命令执行时确定使用哪个 PTY 连接
+    ///
+    /// # 参数
+    ///
+    /// - `conversation_id`: 会话 ID
+    /// - `connection_id`: 连接 ID
+    pub async fn set_conversation_connection(&self, conversation_id: ConversationId, connection_id: String) {
+        crate::unified_exec::set_global_conversation_connection(&conversation_id.to_string(), connection_id).await;
+    }
+
+    /// 获取会话的连接 ID
+    ///
+    /// 返回与特定会话关联的连接 ID
+    ///
+    /// # 参数
+    ///
+    /// - `conversation_id`: 会话 ID
+    ///
+    /// # 返回值
+    ///
+    /// - `Some(connection_id)`: 如果该会话有关联的连接
+    /// - `None`: 如果该会话没有关联的连接
+    pub async fn get_conversation_connection(&self, conversation_id: &ConversationId) -> Option<String> {
+        crate::unified_exec::get_global_conversation_connection(&conversation_id.to_string()).await
+    }
+
     pub async fn new_conversation(&self, config: Config) -> CodexResult<NewConversation> {
         self.spawn_conversation(config, self.auth_manager.clone())
             .await
@@ -66,14 +184,18 @@ impl ConversationManager {
         config: Config,
         auth_manager: Arc<AuthManager>,
     ) -> CodexResult<NewConversation> {
+        // 获取当前的 pty_bridge
+        let pty_bridge = self.pty_bridge.read().await.clone();
+
         let CodexSpawnOk {
             codex,
             conversation_id,
-        } = Codex::spawn(
+        } = Codex::spawn_with_pty_bridge(
             config,
             auth_manager,
             InitialHistory::New,
             self.session_source.clone(),
+            pty_bridge,
         )
         .await?;
         self.finalize_spawn(codex, conversation_id).await
@@ -132,8 +254,20 @@ impl ConversationManager {
         auth_manager: Arc<AuthManager>,
     ) -> CodexResult<NewConversation> {
         let initial_history = RolloutRecorder::get_rollout_history(&rollout_path).await?;
-        self.resume_conversation_with_history(config, initial_history, auth_manager)
-            .await
+        // 获取当前的 pty_bridge
+        let pty_bridge = self.pty_bridge.read().await.clone();
+
+        let CodexSpawnOk {
+            codex,
+            conversation_id,
+        } = Codex::spawn_with_pty_bridge(
+            config,
+            auth_manager,
+            initial_history,
+            self.session_source.clone(),
+            pty_bridge,
+        ).await?;
+        self.finalize_spawn(codex, conversation_id).await
     }
 
     pub async fn resume_conversation_with_history(
@@ -182,10 +316,19 @@ impl ConversationManager {
 
         // Spawn a new conversation with the computed initial history.
         let auth_manager = self.auth_manager.clone();
+        // 获取当前的 pty_bridge
+        let pty_bridge = self.pty_bridge.read().await.clone();
+
         let CodexSpawnOk {
             codex,
             conversation_id,
-        } = Codex::spawn(config, auth_manager, history, self.session_source.clone()).await?;
+        } = Codex::spawn_with_pty_bridge(
+            config,
+            auth_manager,
+            history,
+            self.session_source.clone(),
+            pty_bridge,
+        ).await?;
 
         self.finalize_spawn(codex, conversation_id).await
     }

@@ -20,6 +20,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use eventsource_stream::Eventsource;
@@ -328,12 +329,29 @@ pub(crate) async fn stream_chat_completions(
     }
 
     let tools_json = create_tools_json_for_chat_completions_api(&prompt.tools)?;
-    let payload = json!({
+    let mut payload = json!({
         "model": model_family.slug,
         "messages": messages,
         "stream": true,
+        "stream_options": {
+            "include_usage": true
+        },
         "tools": tools_json,
     });
+
+    // Add model generation parameters if they are set
+    if let Some(temperature) = prompt.temperature {
+        payload["temperature"] = json!(temperature);
+    }
+    if let Some(top_k) = prompt.top_k {
+        payload["top_k"] = json!(top_k);
+    }
+    if let Some(top_p) = prompt.top_p {
+        payload["top_p"] = json!(top_p);
+    }
+    if let Some(repetition_penalty) = prompt.repetition_penalty {
+        payload["repetition_penalty"] = json!(repetition_penalty);
+    }
 
     debug!(
         "POST to {}: {}",
@@ -429,6 +447,49 @@ pub(crate) async fn stream_chat_completions(
     }
 }
 
+/// Parse usage information from a Chat Completions API response chunk.
+/// Returns a TokenUsage if the chunk contains usage data.
+fn parse_usage_from_chunk(chunk: &serde_json::Value) -> Option<TokenUsage> {
+    let usage = chunk.get("usage")?;
+
+    let input_tokens = usage
+        .get("prompt_tokens")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+
+    let output_tokens = usage
+        .get("completion_tokens")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+
+    let total_tokens = usage
+        .get("total_tokens")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(input_tokens + output_tokens);
+
+    // Some providers may include prompt_tokens_details with cached_tokens
+    let cached_input_tokens = usage
+        .get("prompt_tokens_details")
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+
+    // Some providers may include completion_tokens_details with reasoning_tokens
+    let reasoning_output_tokens = usage
+        .get("completion_tokens_details")
+        .and_then(|details| details.get("reasoning_tokens"))
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+
+    Some(TokenUsage {
+        input_tokens,
+        cached_input_tokens,
+        output_tokens,
+        reasoning_output_tokens,
+        total_tokens,
+    })
+}
+
 async fn append_assistant_text(
     tx_event: &mpsc::Sender<Result<ResponseEvent>>,
     assistant_item: &mut Option<ResponseItem>,
@@ -484,6 +545,7 @@ async fn append_reasoning_text(
             .await;
     }
 }
+
 /// Lightweight SSE processor for the Chat Completions streaming format. The
 /// output is mapped onto Codex's internal [`ResponseEvent`] so that the rest
 /// of the pipeline can stay agnostic of the underlying wire format.
@@ -511,6 +573,9 @@ async fn process_chat_sse<S>(
     }
 
     let mut fn_call_state = FunctionCallState::default();
+    let mut _assistant_text = String::new();
+    let mut _reasoning_text = String::new();
+    let mut accumulated_usage: Option<TokenUsage> = None;
     let mut assistant_item: Option<ResponseItem> = None;
     let mut reasoning_item: Option<ResponseItem> = None;
 
@@ -533,7 +598,7 @@ async fn process_chat_sse<S>(
                 let _ = tx_event
                     .send(Ok(ResponseEvent::Completed {
                         response_id: String::new(),
-                        token_usage: None,
+                        token_usage: accumulated_usage.clone(),
                     }))
                     .await;
                 return;
@@ -564,7 +629,7 @@ async fn process_chat_sse<S>(
             let _ = tx_event
                 .send(Ok(ResponseEvent::Completed {
                     response_id: String::new(),
-                    token_usage: None,
+                    token_usage: accumulated_usage.clone(),
                 }))
                 .await;
             return;
@@ -576,6 +641,11 @@ async fn process_chat_sse<S>(
             Err(_) => continue,
         };
         trace!("chat_completions received SSE chunk: {chunk:?}");
+
+        // Extract usage information if present
+        if let Some(usage) = parse_usage_from_chunk(&chunk) {
+            accumulated_usage = Some(usage);
+        }
 
         let choice_opt = chunk.get("choices").and_then(|c| c.get(0));
 
@@ -706,7 +776,7 @@ async fn process_chat_sse<S>(
                 let _ = tx_event
                     .send(Ok(ResponseEvent::Completed {
                         response_id: String::new(),
-                        token_usage: None,
+                        token_usage: accumulated_usage.clone(),
                     }))
                     .await;
 

@@ -1,5 +1,6 @@
 use crate::bash::parse_shell_lc_plain_commands;
 
+#[allow(dead_code)]
 pub fn command_might_be_dangerous(command: &[String]) -> bool {
     if is_dangerous_to_call_with_exec(command) {
         return true;
@@ -17,6 +18,7 @@ pub fn command_might_be_dangerous(command: &[String]) -> bool {
     false
 }
 
+#[allow(dead_code)]
 fn is_dangerous_to_call_with_exec(command: &[String]) -> bool {
     let cmd0 = command.first().map(String::as_str);
 

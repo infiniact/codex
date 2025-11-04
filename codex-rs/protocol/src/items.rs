@@ -95,14 +95,29 @@ impl AgentMessageItem {
     }
 
     pub fn as_legacy_events(&self) -> Vec<EventMsg> {
-        self.content
+        let events: Vec<EventMsg> = self.content
             .iter()
             .map(|c| match c {
-                AgentMessageContent::Text { text } => EventMsg::AgentMessage(AgentMessageEvent {
-                    message: text.clone(),
-                }),
+                AgentMessageContent::Text { text } => {
+                    // 添加日志以追踪消息发送
+                    tracing::info!(
+                        "📤 [AgentMessage] 准备发送事件，内容长度: {} 字符，预览: {}",
+                        text.len(),
+                        if text.len() > 100 {
+                            format!("{}...", &text[..100])
+                        } else {
+                            text.clone()
+                        }
+                    );
+                    EventMsg::AgentMessage(AgentMessageEvent {
+                        message: text.clone(),
+                    })
+                }
             })
-            .collect()
+            .collect();
+
+        tracing::info!("📤 [AgentMessage] 总共生成 {} 个事件", events.len());
+        events
     }
 }
 

@@ -46,6 +46,22 @@ pub struct Prompt {
 
     /// Optional the output schema for the model's response.
     pub output_schema: Option<Value>,
+
+    /// Temperature parameter for controlling randomness in generation (0.0-2.0).
+    /// Higher values make output more random, lower values more deterministic.
+    pub temperature: Option<f64>,
+
+    /// Top-k sampling parameter. Limits the number of highest probability 
+    /// vocabulary tokens to keep for top-k-filtering.
+    pub top_k: Option<u32>,
+
+    /// Top-p (nucleus) sampling parameter (0.0-1.0). 
+    /// Keeps the smallest set of tokens whose cumulative probability exceeds top_p.
+    pub top_p: Option<f64>,
+
+    /// Repetition penalty parameter (typically 1.0-1.2).
+    /// Values > 1.0 discourage repetition, values < 1.0 encourage it.
+    pub repetition_penalty: Option<f64>,
 }
 
 impl Prompt {

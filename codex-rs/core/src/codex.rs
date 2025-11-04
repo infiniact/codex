@@ -160,6 +160,17 @@ impl Codex {
         conversation_history: InitialHistory,
         session_source: SessionSource,
     ) -> CodexResult<CodexSpawnOk> {
+        Self::spawn_with_pty_bridge(config, auth_manager, conversation_history, session_source, None).await
+    }
+
+    /// Spawn a new [`Codex`] with optional PtyServiceBridge and initialize the session.
+    pub async fn spawn_with_pty_bridge(
+        config: Config,
+        auth_manager: Arc<AuthManager>,
+        conversation_history: InitialHistory,
+        session_source: SessionSource,
+        pty_bridge: Option<Arc<dyn crate::unified_exec::PtyServiceBridge>>,
+    ) -> CodexResult<CodexSpawnOk> {
         let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
         let (tx_event, rx_event) = async_channel::unbounded();
 
@@ -181,18 +192,18 @@ impl Codex {
             cwd: config.cwd.clone(),
             original_config_do_not_use: Arc::clone(&config),
             features: config.features.clone(),
-            session_source,
+            session_source: session_source.clone(),
         };
 
         // Generate a unique ID for the lifetime of this Codex session.
-        let session_source_clone = session_configuration.session_source.clone();
         let session = Session::new(
             session_configuration,
             config.clone(),
             auth_manager.clone(),
             tx_event.clone(),
             conversation_history,
-            session_source_clone,
+            session_source,
+            pty_bridge,
         )
         .await
         .map_err(|e| {
@@ -278,6 +289,10 @@ pub(crate) struct TurnContext {
     pub(crate) final_output_json_schema: Option<Value>,
     pub(crate) codex_linux_sandbox_exe: Option<PathBuf>,
     pub(crate) tool_call_gate: Arc<ReadinessFlag>,
+    pub(crate) model_temperature: Option<f64>,
+    pub(crate) model_top_k: Option<u32>,
+    pub(crate) model_top_p: Option<f64>,
+    pub(crate) model_repetition_penalty: Option<f64>,
 }
 
 impl TurnContext {
@@ -378,6 +393,11 @@ pub(crate) struct SessionSettingsUpdate {
 }
 
 impl Session {
+    /// 获取会话的 conversation_id
+    pub(crate) fn conversation_id(&self) -> ConversationId {
+        self.conversation_id
+    }
+
     fn make_turn_context(
         auth_manager: Option<Arc<AuthManager>>,
         otel_event_manager: &OtelEventManager,
@@ -434,6 +454,10 @@ impl Session {
             final_output_json_schema: None,
             codex_linux_sandbox_exe: config.codex_linux_sandbox_exe.clone(),
             tool_call_gate: Arc::new(ReadinessFlag::new()),
+            model_temperature: config.model_temperature,
+            model_top_k: config.model_top_k,
+            model_top_p: config.model_top_p,
+            model_repetition_penalty: config.model_repetition_penalty,
         }
     }
 
@@ -444,6 +468,7 @@ impl Session {
         tx_event: Sender<Event>,
         initial_history: InitialHistory,
         session_source: SessionSource,
+        pty_bridge: Option<Arc<dyn crate::unified_exec::PtyServiceBridge>>,
     ) -> anyhow::Result<Arc<Self>> {
         debug!(
             "Configuring session: model={}; provider={:?}",
@@ -589,9 +614,16 @@ impl Session {
         // Create the mutable state for the Session.
         let state = SessionState::new(session_configuration.clone());
 
+        let unified_exec_manager = UnifiedExecSessionManager::default();
+
+        // 如果提供了 PtyServiceBridge，则配置到 unified_exec_manager
+        if let Some(bridge) = pty_bridge {
+            unified_exec_manager.set_pty_bridge(bridge).await;
+        }
+
         let services = SessionServices {
             mcp_connection_manager,
-            unified_exec_manager: UnifiedExecSessionManager::default(),
+            unified_exec_manager,
             notifier: UserNotifier::new(config.notify.clone()),
             rollout: Mutex::new(Some(rollout_recorder)),
             user_shell: default_shell,
@@ -1701,6 +1733,10 @@ async fn spawn_review_thread(
         final_output_json_schema: None,
         codex_linux_sandbox_exe: parent_turn_context.codex_linux_sandbox_exe.clone(),
         tool_call_gate: Arc::new(ReadinessFlag::new()),
+        model_temperature: parent_turn_context.model_temperature,
+        model_top_k: parent_turn_context.model_top_k,
+        model_top_p: parent_turn_context.model_top_p,
+        model_repetition_penalty: parent_turn_context.model_repetition_penalty,
     };
 
     // Seed the child task with the review prompt as the initial user message.
@@ -1773,14 +1809,19 @@ pub(crate) async fn run_task(
             sess.clone_history().await.get_history_for_prompt()
         };
 
-        let turn_input_messages = turn_input
+        let turn_input_messages: Vec<String> = turn_input
             .iter()
-            .filter_map(|item| match parse_turn_item(item) {
-                Some(TurnItem::UserMessage(user_message)) => Some(user_message),
+            .filter_map(|item| match item {
+                ResponseItem::Message { content, .. } => Some(content),
                 _ => None,
             })
-            .map(|user_message| user_message.message())
-            .collect::<Vec<String>>();
+            .flat_map(|content| {
+                content.iter().filter_map(|item| match item {
+                    ContentItem::OutputText { text } => Some(text.clone()),
+                    _ => None,
+                })
+            })
+            .collect();
         match run_turn(
             Arc::clone(&sess),
             Arc::clone(&turn_context),
@@ -1891,6 +1932,10 @@ async fn run_turn(
         parallel_tool_calls,
         base_instructions_override: turn_context.base_instructions.clone(),
         output_schema: turn_context.final_output_json_schema.clone(),
+        temperature: turn_context.model_temperature,
+        top_k: turn_context.model_top_k,
+        top_p: turn_context.model_top_p,
+        repetition_penalty: turn_context.model_repetition_penalty,
     };
 
     let mut retries = 0;

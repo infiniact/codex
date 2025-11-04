@@ -271,6 +271,26 @@ pub struct Config {
     /// or placeholder replacement will occur for fast keypress bursts.
     pub disable_paste_burst: bool,
 
+    /// Temperature parameter for controlling randomness in generation (0.0-2.0).
+    /// Higher values make output more random, lower values more deterministic.
+    /// For code generation, values between 0.0-0.3 are recommended.
+    pub model_temperature: Option<f64>,
+
+    /// Top-k sampling parameter. Limits the number of highest probability
+    /// vocabulary tokens to keep for top-k-filtering.
+    /// For code generation, values between 40-50 are recommended.
+    pub model_top_k: Option<u32>,
+
+    /// Top-p (nucleus) sampling parameter (0.0-1.0).
+    /// Keeps the smallest set of tokens whose cumulative probability exceeds top_p.
+    /// For code generation, values between 0.9-0.95 are recommended.
+    pub model_top_p: Option<f64>,
+
+    /// Repetition penalty parameter (typically 1.0-1.2).
+    /// Values > 1.0 discourage repetition, values < 1.0 encourage it.
+    /// For code generation, values between 1.05-1.15 are recommended.
+    pub model_repetition_penalty: Option<f64>,
+
     /// OTEL configuration (exporter type, endpoint, headers, etc.).
     pub otel: crate::config::types::OtelConfig,
 }
@@ -641,6 +661,30 @@ pub struct ConfigToml {
     /// All characters are inserted as they are received, and no buffering
     /// or placeholder replacement will occur for fast keypress bursts.
     pub disable_paste_burst: Option<bool>,
+
+    /// Temperature parameter for controlling randomness in generation (0.0-2.0).
+    /// Higher values make output more random, lower values more deterministic.
+    /// For code generation, values between 0.0-0.3 are recommended.
+    #[serde(default)]
+    pub model_temperature: Option<f64>,
+
+    /// Top-k sampling parameter. Limits the number of highest probability
+    /// vocabulary tokens to keep for top-k-filtering.
+    /// For code generation, values between 40-50 are recommended.
+    #[serde(default)]
+    pub model_top_k: Option<u32>,
+
+    /// Top-p (nucleus) sampling parameter (0.0-1.0).
+    /// Keeps the smallest set of tokens whose cumulative probability exceeds top_p.
+    /// For code generation, values between 0.9-0.95 are recommended.
+    #[serde(default)]
+    pub model_top_p: Option<f64>,
+
+    /// Repetition penalty parameter (typically 1.0-1.2).
+    /// Values > 1.0 discourage repetition, values < 1.0 encourage it.
+    /// For code generation, values between 1.05-1.15 are recommended.
+    #[serde(default)]
+    pub model_repetition_penalty: Option<f64>,
 
     /// OTEL configuration.
     pub otel: Option<crate::config::types::OtelConfigToml>,
@@ -1165,6 +1209,10 @@ impl Config {
             windows_wsl_setup_acknowledged: cfg.windows_wsl_setup_acknowledged.unwrap_or(false),
             notices: cfg.notice.unwrap_or_default(),
             disable_paste_burst: cfg.disable_paste_burst.unwrap_or(false),
+            model_temperature: config_profile.model_temperature.or(cfg.model_temperature),
+            model_top_k: config_profile.model_top_k.or(cfg.model_top_k),
+            model_top_p: config_profile.model_top_p.or(cfg.model_top_p),
+            model_repetition_penalty: config_profile.model_repetition_penalty.or(cfg.model_repetition_penalty),
             tui_notifications: cfg
                 .tui
                 .as_ref()
@@ -2911,6 +2959,10 @@ model_verbosity = "high"
                 windows_wsl_setup_acknowledged: false,
                 notices: Default::default(),
                 disable_paste_burst: false,
+                model_temperature: None,
+                model_top_k: None,
+                model_top_p: None,
+                model_repetition_penalty: None,
                 tui_notifications: Default::default(),
                 otel: OtelConfig::default(),
             },
@@ -2985,6 +3037,10 @@ model_verbosity = "high"
             disable_paste_burst: false,
             tui_notifications: Default::default(),
             otel: OtelConfig::default(),
+            model_temperature: None,
+            model_top_k: None,
+            model_top_p: None,
+            model_repetition_penalty: None,
         };
 
         assert_eq!(expected_gpt3_profile_config, gpt3_profile_config);
@@ -3070,6 +3126,10 @@ model_verbosity = "high"
             windows_wsl_setup_acknowledged: false,
             notices: Default::default(),
             disable_paste_burst: false,
+            model_temperature: None,
+            model_top_k: None,
+            model_top_p: None,
+            model_repetition_penalty: None,
             tui_notifications: Default::default(),
             otel: OtelConfig::default(),
         };
@@ -3125,6 +3185,10 @@ model_verbosity = "high"
             model_reasoning_effort: Some(ReasoningEffort::High),
             model_reasoning_summary: ReasoningSummary::Detailed,
             model_verbosity: Some(Verbosity::High),
+            model_temperature: None,
+            model_top_k: None,
+            model_top_p: None,
+            model_repetition_penalty: None,
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
             base_instructions: None,
             developer_instructions: None,

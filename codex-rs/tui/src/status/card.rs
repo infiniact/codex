@@ -313,9 +313,7 @@ impl HistoryCell for StatusHistoryCell {
 
         let note_first_line = Line::from(vec![
             Span::from("Visit ").cyan(),
-            "https://chatgpt.com/codex/settings/usage"
-                .cyan()
-                .underlined(),
+            "chatgpt.com/codex/settings/usage".cyan().underlined(),
             Span::from(" for up-to-date").cyan(),
         ]);
         let note_second_line = Line::from(vec![

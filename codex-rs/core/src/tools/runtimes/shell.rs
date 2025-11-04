@@ -27,6 +27,7 @@ use futures::future::BoxFuture;
 use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct ShellRequest {
     pub command: Vec<String>,
     pub cwd: PathBuf,
@@ -46,6 +47,7 @@ impl ProvidesSandboxRetryData for ShellRequest {
 }
 
 #[derive(Default)]
+#[allow(dead_code)]
 pub struct ShellRuntime;
 
 #[derive(serde::Serialize, Clone, Debug, Eq, PartialEq, Hash)]
@@ -56,10 +58,12 @@ pub(crate) struct ApprovalKey {
 }
 
 impl ShellRuntime {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self
     }
 
+    #[allow(dead_code)]
     fn stdout_stream(ctx: &ToolCtx<'_>) -> Option<crate::exec::StdoutStream> {
         Some(crate::exec::StdoutStream {
             sub_id: ctx.turn.sub_id.clone(),

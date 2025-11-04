@@ -37,6 +37,7 @@ use ts_rs::TS;
 pub use crate::approvals::ApplyPatchApprovalRequestEvent;
 pub use crate::approvals::ExecApprovalRequestEvent;
 pub use crate::approvals::SandboxCommandAssessment;
+pub use crate::approvals::SandboxRiskCategory;
 pub use crate::approvals::SandboxRiskLevel;
 
 /// Open/close tags for special user-input blocks. Used across crates to avoid
@@ -812,8 +813,12 @@ impl TokenUsage {
         (self.non_cached_input() + self.output_tokens.max(0)).max(0)
     }
 
+    /// For estimating what % of the model's context window is used, we need to account
+    /// for reasoning output tokens from prior turns being dropped from the context window.
+    /// We approximate this here by subtracting reasoning output tokens from the total.
+    /// This will be off for the current turn and pending function calls.
     pub fn tokens_in_context_window(&self) -> i64 {
-        self.total_tokens
+        (self.total_tokens - self.reasoning_output_tokens).max(0)
     }
 
     /// Estimate the remaining user-controllable percentage of the model's context window.

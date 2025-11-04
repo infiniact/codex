@@ -16,6 +16,8 @@ pub(crate) enum UnifiedExecError {
         message: String,
         output: ExecToolCallOutput,
     },
+    #[error("Other error: {0}")]
+    Other(String),
 }
 
 impl UnifiedExecError {

@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::function_tool::FunctionCallError;
 use crate::protocol::EventMsg;
+use crate::protocol::ExecCommandEndEvent;
 use crate::protocol::ExecCommandOutputDeltaEvent;
 use crate::protocol::ExecOutputStream;
 use crate::tools::context::ToolInvocation;
@@ -90,7 +91,25 @@ impl ToolHandler for UnifiedExecHandler {
         };
 
         let manager: &UnifiedExecSessionManager = &session.services.unified_exec_manager;
-        let context = UnifiedExecContext::new(session.clone(), turn.clone(), call_id.clone());
+
+        // 从全局 connection_map 中获取 connection_id
+        let conversation_id = session.conversation_id().to_string();
+        tracing::info!("🔍 [unified_exec] 查询会话的连接ID - conversation_id: {conversation_id}");
+
+        let connection_id = crate::unified_exec::get_global_conversation_connection(&conversation_id).await;
+        if let Some(ref conn_id) = connection_id {
+            tracing::info!("🔗 [unified_exec] ✅ 找到会话的连接ID: {conn_id}");
+        } else {
+            tracing::warn!("⚠️ [unified_exec] ❌ 未找到会话的连接ID，将创建新连接");
+        }
+
+        let context = UnifiedExecContext::with_connection_id(
+            session.clone(),
+            turn.clone(),
+            call_id.clone(),
+            conversation_id,
+            connection_id,
+        );
 
         let response = match tool_name.as_str() {
             "exec_command" => {
@@ -99,6 +118,11 @@ impl ToolHandler for UnifiedExecHandler {
                         "failed to parse exec_command arguments: {err:?}"
                     ))
                 })?;
+
+                // 添加调试日志
+                tracing::info!("🔍 [unified_exec] exec_command 接收到的命令: '{}'", args.cmd);
+                tracing::info!("🔍 [unified_exec] 命令内容: '{}', Shell: '{}', Login: {}",
+                    args.cmd, args.shell, args.login);
 
                 let event_ctx = ToolEventCtx::new(
                     context.session.as_ref(),
@@ -110,7 +134,7 @@ impl ToolHandler for UnifiedExecHandler {
                     ToolEmitter::unified_exec(args.cmd.clone(), context.turn.cwd.clone(), true);
                 emitter.emit(event_ctx, ToolEventStage::Begin).await;
 
-                manager
+                let response = manager
                     .exec_command(
                         ExecCommandRequest {
                             command: &args.cmd,
@@ -118,13 +142,31 @@ impl ToolHandler for UnifiedExecHandler {
                             login: args.login,
                             yield_time_ms: args.yield_time_ms,
                             max_output_tokens: args.max_output_tokens,
+                            backend: Some(super::super::super::unified_exec::ExecutionBackend::PtyService),  // 默认使用 PtyService
+                            display_in_panel: true,  // 默认在面板显示
                         },
                         &context,
                     )
                     .await
                     .map_err(|err| {
                         FunctionCallError::RespondToModel(format!("exec_command failed: {err:?}"))
-                    })?
+                    })?;
+
+                // 发送 ExecCommandEnd 事件
+                let end_event = ExecCommandEndEvent {
+                    call_id: response.event_call_id.clone(),
+                    stdout: response.output.clone(),
+                    stderr: String::new(),
+                    aggregated_output: response.output.clone(),
+                    exit_code: response.exit_code.unwrap_or(0),
+                    duration: response.wall_time,
+                    formatted_output: response.output.clone(),
+                };
+                session
+                    .send_event(turn.as_ref(), EventMsg::ExecCommandEnd(end_event))
+                    .await;
+
+                response
             }
             "write_stdin" => {
                 let args: WriteStdinArgs = serde_json::from_str(&arguments).map_err(|err| {

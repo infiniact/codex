@@ -171,7 +171,6 @@ async fn exec_windows_sandbox(
     params: ExecParams,
     sandbox_policy: &SandboxPolicy,
 ) -> Result<RawExecToolCallOutput> {
-    use crate::config::find_codex_home;
     use codex_windows_sandbox::run_windows_sandbox_capture;
 
     let ExecParams {
@@ -189,17 +188,8 @@ async fn exec_windows_sandbox(
     };
 
     let sandbox_cwd = cwd.clone();
-    let logs_base_dir = find_codex_home().ok();
     let spawn_res = tokio::task::spawn_blocking(move || {
-        run_windows_sandbox_capture(
-            policy_str,
-            &sandbox_cwd,
-            command,
-            &cwd,
-            env,
-            timeout_ms,
-            logs_base_dir.as_deref(),
-        )
+        run_windows_sandbox_capture(policy_str, &sandbox_cwd, command, &cwd, env, timeout_ms)
     })
     .await;
 

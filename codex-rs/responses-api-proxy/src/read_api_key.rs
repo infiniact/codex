@@ -121,7 +121,7 @@ where
     if total_read == capacity && !saw_newline && !saw_eof {
         buf.zeroize();
         return Err(anyhow!(
-            "API key is too large to fit in the {BUFFER_SIZE}-byte buffer"
+            "OPENAI_API_KEY is too large to fit in the 512-byte buffer"
         ));
     }
 
@@ -133,7 +133,7 @@ where
     if total == AUTH_HEADER_PREFIX.len() {
         buf.zeroize();
         return Err(anyhow!(
-            "API key must be provided via stdin (e.g. printenv OPENAI_API_KEY | codex responses-api-proxy)"
+            "OPENAI_API_KEY must be provided via stdin (e.g. printenv OPENAI_API_KEY | codex responses-api-proxy)"
         ));
     }
 
@@ -214,7 +214,7 @@ fn validate_auth_header_bytes(key_bytes: &[u8]) -> Result<()> {
     }
 
     Err(anyhow!(
-        "API key may only contain ASCII letters, numbers, '-' or '_'"
+        "OPENAI_API_KEY may only contain ASCII letters, numbers, '-' or '_'"
     ))
 }
 
@@ -290,9 +290,7 @@ mod tests {
         })
         .unwrap_err();
         let message = format!("{err:#}");
-        let expected_error =
-            format!("API key is too large to fit in the {BUFFER_SIZE}-byte buffer");
-        assert!(message.contains(&expected_error));
+        assert!(message.contains("OPENAI_API_KEY is too large to fit in the 512-byte buffer"));
     }
 
     #[test]
@@ -319,7 +317,9 @@ mod tests {
         .unwrap_err();
 
         let message = format!("{err:#}");
-        assert!(message.contains("API key may only contain ASCII letters, numbers, '-' or '_'"));
+        assert!(
+            message.contains("OPENAI_API_KEY may only contain ASCII letters, numbers, '-' or '_'")
+        );
     }
 
     #[test]
@@ -337,6 +337,8 @@ mod tests {
         .unwrap_err();
 
         let message = format!("{err:#}");
-        assert!(message.contains("API key may only contain ASCII letters, numbers, '-' or '_'"));
+        assert!(
+            message.contains("OPENAI_API_KEY may only contain ASCII letters, numbers, '-' or '_'")
+        );
     }
 }

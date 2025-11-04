@@ -9,6 +9,8 @@ use crate::codex::TurnContext;
 use crate::exec::ExecParams;
 use crate::exec_env::create_env;
 use crate::function_tool::FunctionCallError;
+use crate::protocol::EventMsg;
+use crate::protocol::ExecCommandEndEvent;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
@@ -19,9 +21,11 @@ use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
 use crate::tools::runtimes::apply_patch::ApplyPatchRequest;
 use crate::tools::runtimes::apply_patch::ApplyPatchRuntime;
-use crate::tools::runtimes::shell::ShellRequest;
-use crate::tools::runtimes::shell::ShellRuntime;
 use crate::tools::sandboxing::ToolCtx;
+use crate::unified_exec::ExecCommandRequest;
+use crate::unified_exec::ExecutionBackend;
+use crate::unified_exec::UnifiedExecContext;
+use crate::unified_exec::UnifiedExecSessionManager;
 
 pub struct ShellHandler;
 
@@ -212,31 +216,81 @@ impl ShellHandler {
         let event_ctx = ToolEventCtx::new(session.as_ref(), turn.as_ref(), &call_id, None);
         emitter.begin(event_ctx).await;
 
-        let req = ShellRequest {
-            command: exec_params.command.clone(),
-            cwd: exec_params.cwd.clone(),
-            timeout_ms: exec_params.timeout_ms,
-            env: exec_params.env.clone(),
-            with_escalated_permissions: exec_params.with_escalated_permissions,
-            justification: exec_params.justification.clone(),
-        };
-        let mut orchestrator = ToolOrchestrator::new();
-        let mut runtime = ShellRuntime::new();
-        let tool_ctx = ToolCtx {
-            session: session.as_ref(),
-            turn: turn.as_ref(),
+        // 获取 unified_exec_manager 并创建执行上下文
+        let manager: &UnifiedExecSessionManager = &session.services.unified_exec_manager;
+
+        // 从 global connection map 中查询 connection_id
+        let conversation_id = session.conversation_id().to_string();
+        tracing::info!("🔍 [shell handler] 查询会话的连接ID - conversation_id: {conversation_id}");
+
+        let connection_id = crate::unified_exec::get_global_conversation_connection(&conversation_id).await;
+        if let Some(ref conn_id) = connection_id {
+            tracing::info!("🔗 [shell handler] ✅ 找到会话的连接ID: {conn_id}");
+        } else {
+            tracing::warn!("⚠️ [shell handler] ❌ 未找到会话的连接ID，将创建新连接");
+        }
+
+        let context = UnifiedExecContext::with_connection_id(
+            session.clone(),
+            turn.clone(),
+            call_id.clone(),
+            conversation_id,
+            connection_id,
+        );
+
+        // 将 Vec<String> 命令转换为单个字符串
+        let command_str = exec_params.command.join(" ");
+
+        // 添加调试日志
+        tracing::info!("🔍 [shell handler] 原始命令数组: {:?}", exec_params.command);
+        tracing::info!("🔍 [shell handler] 连接后的命令字符串: '{command_str}'");
+        tracing::info!("🔍 [shell handler] 命令数组长度: {}, 内容: {:?}",
+            exec_params.command.len(), exec_params.command);
+
+        // 调用 unified_exec 执行命令
+        let response = manager
+            .exec_command(
+                ExecCommandRequest {
+                    command: &command_str,
+                    shell: "/bin/bash",
+                    login: true,
+                    yield_time_ms: None,
+                    max_output_tokens: None,
+                    backend: Some(ExecutionBackend::PtyService),
+                    display_in_panel: true,
+                },
+                &context,
+            )
+            .await
+            .map_err(|err| {
+                FunctionCallError::RespondToModel(format!("shell execution failed: {err:?}"))
+            })?;
+
+        // 发送 ExecCommandEnd 事件
+        let end_event = ExecCommandEndEvent {
             call_id: call_id.clone(),
-            tool_name: tool_name.to_string(),
+            stdout: response.output.clone(),
+            stderr: String::new(),
+            aggregated_output: response.output.clone(),
+            exit_code: response.exit_code.unwrap_or(0),
+            duration: response.wall_time,
+            formatted_output: response.output.clone(),
         };
-        let out = orchestrator
-            .run(&mut runtime, &req, &tool_ctx, &turn, turn.approval_policy)
+        session
+            .send_event(turn.as_ref(), EventMsg::ExecCommandEnd(end_event))
             .await;
-        let event_ctx = ToolEventCtx::new(session.as_ref(), turn.as_ref(), &call_id, None);
-        let content = emitter.finish(event_ctx, out).await?;
+
+        // 将 UnifiedExecResponse 转换为 shell 工具的输出格式
+        let content = format!(
+            r#"{{"output":"{}","exit_code":{}}}"#,
+            response.output.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"),
+            response.exit_code.unwrap_or(0)
+        );
+
         Ok(ToolOutput::Function {
             content,
             content_items: None,
-            success: Some(true),
+            success: Some(response.exit_code.is_none() || response.exit_code == Some(0)),
         })
     }
 }

@@ -38,7 +38,7 @@ mod response_processing;
 pub mod sandboxing;
 pub mod token_data;
 mod truncate;
-mod unified_exec;
+pub mod unified_exec;
 mod user_instructions;
 pub use model_provider_info::BUILT_IN_OSS_MODEL_PROVIDER_ID;
 pub use model_provider_info::ModelProviderInfo;
@@ -85,7 +85,6 @@ pub mod util;
 pub use apply_patch::CODEX_APPLY_PATCH_ARG1;
 pub use command_safety::is_safe_command;
 pub use safety::get_platform_sandbox;
-pub use safety::set_windows_sandbox_enabled;
 // Re-export the protocol types from the standalone `codex-protocol` crate so existing
 // `codex_core::protocol::...` references continue to work across the workspace.
 pub use codex_protocol::protocol;

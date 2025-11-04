@@ -372,11 +372,6 @@ pub struct FuzzyFileSearchResponse {
 #[strum(serialize_all = "camelCase")]
 pub enum ServerNotification {
     /// NEW NOTIFICATIONS
-    #[serde(rename = "account/updated")]
-    #[ts(rename = "account/updated")]
-    #[strum(serialize = "account/updated")]
-    AccountUpdated(v2::AccountUpdatedNotification),
-
     #[serde(rename = "account/rateLimits/updated")]
     #[ts(rename = "account/rateLimits/updated")]
     #[strum(serialize = "account/rateLimits/updated")]
@@ -396,7 +391,6 @@ pub enum ServerNotification {
 impl ServerNotification {
     pub fn to_params(self) -> Result<serde_json::Value, serde_json::Error> {
         match self {
-            ServerNotification::AccountUpdated(params) => serde_json::to_value(params),
             ServerNotification::AccountRateLimitsUpdated(params) => serde_json::to_value(params),
             ServerNotification::AuthStatusChange(params) => serde_json::to_value(params),
             ServerNotification::LoginChatGptComplete(params) => serde_json::to_value(params),

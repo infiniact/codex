@@ -106,4 +106,3 @@ insta = { workspace = true }
 pretty_assertions = { workspace = true }
 rand = { workspace = true }
 vt100 = { workspace = true }
-serial_test = { workspace = true }

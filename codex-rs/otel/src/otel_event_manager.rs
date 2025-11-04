@@ -8,6 +8,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::SandboxPolicy;
+use codex_protocol::protocol::SandboxRiskCategory;
 use codex_protocol::protocol::SandboxRiskLevel;
 use codex_protocol::user_input::UserInput;
 use eventsource_stream::Event as StreamEvent;
@@ -372,9 +373,19 @@ impl OtelEventManager {
         call_id: &str,
         status: &str,
         risk_level: Option<SandboxRiskLevel>,
+        risk_categories: &[SandboxRiskCategory],
         duration: Duration,
     ) {
         let level = risk_level.map(|level| level.as_str());
+        let categories = if risk_categories.is_empty() {
+            String::new()
+        } else {
+            risk_categories
+                .iter()
+                .map(SandboxRiskCategory::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
 
         tracing::event!(
             tracing::Level::INFO,
@@ -391,6 +402,7 @@ impl OtelEventManager {
             call_id = %call_id,
             status = %status,
             risk_level = level,
+            risk_categories = categories,
             duration_ms = %duration.as_millis(),
         );
     }

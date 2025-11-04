@@ -18,6 +18,7 @@ use crate::tools::runtimes::unified_exec::UnifiedExecRuntime;
 use crate::tools::sandboxing::ToolCtx;
 
 use super::ExecCommandRequest;
+use super::ExecutionBackend;
 use super::MIN_YIELD_TIME_MS;
 use super::SessionEntry;
 use super::UnifiedExecContext;
@@ -34,6 +35,88 @@ use super::truncate_output_to_tokens;
 
 impl UnifiedExecSessionManager {
     pub(crate) async fn exec_command(
+        &self,
+        request: ExecCommandRequest<'_>,
+        context: &UnifiedExecContext,
+    ) -> Result<UnifiedExecResponse, UnifiedExecError> {
+        tracing::info!("🎯 [unified_exec] exec_command 开始 - 命令: '{}', 请求后端: {:?}", request.command, request.backend);
+
+        // 选择执行后端
+        let backend = self.select_backend(request.command, request.backend).await;
+        tracing::info!("📋 [unified_exec] 选择的执行后端: {:?}", backend);
+
+        // 根据后端执行
+        match backend {
+            ExecutionBackend::Default => {
+                tracing::info!("🔧 [unified_exec] 使用默认后端执行（带沙箱）");
+                self.exec_command_default(request, context).await
+            }
+            ExecutionBackend::PtyService => {
+                tracing::info!("🚀 [unified_exec] 使用 PtyService 后端执行");
+                self.exec_command_pty_service(request, context).await
+            }
+            ExecutionBackend::Auto => {
+                // Auto 应该已经被解析为具体的后端，使用默认
+                tracing::warn!("⚠️ [unified_exec] Auto 后端未解析，回退到默认后端");
+                self.exec_command_default(request, context).await
+            }
+        }
+    }
+
+    /// 选择执行后端
+    async fn select_backend(&self, command: &str, request_backend: Option<ExecutionBackend>) -> ExecutionBackend {
+        let config = self.config.read().await;
+
+        tracing::debug!("🔍 [unified_exec] 后端选择 - 命令: '{}', 请求后端: {:?}, 配置默认: {:?}, 强制: {}",
+            command, request_backend, config.default_backend, config.force_backend);
+
+        // 1. 如果请求指定了后端，使用它
+        if let Some(backend) = request_backend && backend != ExecutionBackend::Auto {
+            tracing::info!("✅ [unified_exec] 使用请求指定的后端: {:?}", backend);
+            return backend;
+        }
+
+        // 2. 如果配置强制使用某个后端
+        if config.force_backend && config.default_backend != ExecutionBackend::Auto {
+            tracing::info!("✅ [unified_exec] 强制使用配置的后端: {:?}", config.default_backend);
+            return config.default_backend;
+        }
+
+        // 3. 自动选择 - 简单规则
+        if request_backend == Some(ExecutionBackend::Auto) || config.default_backend == ExecutionBackend::Auto {
+            tracing::debug!("🤔 [unified_exec] 自动选择后端规则...");
+            // 交互式命令使用 PtyService
+            if command.contains("bash -i") || command.contains("sh -i") || command.contains("zsh -i") {
+                tracing::info!("✅ [unified_exec] 检测到交互式 shell，选择 PtyService");
+                return ExecutionBackend::PtyService;
+            }
+            // SSH 使用 PtyService
+            if command.starts_with("ssh ") {
+                tracing::info!("✅ [unified_exec] 检测到 SSH 命令，选择 PtyService");
+                return ExecutionBackend::PtyService;
+            }
+            // 危险命令使用默认（带沙箱）
+            if command.contains("rm -rf") || command.contains("sudo") {
+                tracing::info!("⚠️ [unified_exec] 检测到危险命令，选择默认后端（带沙箱）");
+                return ExecutionBackend::Default;
+            }
+        }
+
+        // 4. 使用配置的默认后端
+        let final_backend = if config.default_backend == ExecutionBackend::Auto {
+            tracing::info!("✅ [unified_exec] 配置为 Auto，回退到默认后端");
+            ExecutionBackend::Default
+        } else {
+            tracing::info!("✅ [unified_exec] 使用配置的默认后端: {:?}", config.default_backend);
+            config.default_backend
+        };
+
+        tracing::info!("🎯 [unified_exec] 最终选择的后端: {:?}", final_backend);
+        final_backend
+    }
+
+    /// 使用默认后端执行（原有逻辑）
+    async fn exec_command_default(
         &self,
         request: ExecCommandRequest<'_>,
         context: &UnifiedExecContext,
@@ -94,6 +177,89 @@ impl UnifiedExecSessionManager {
             .await;
         }
 
+        Ok(response)
+    }
+
+    /// 使用 PtyService 后端执行
+    async fn exec_command_pty_service(
+        &self,
+        request: ExecCommandRequest<'_>,
+        context: &UnifiedExecContext,
+    ) -> Result<UnifiedExecResponse, UnifiedExecError> {
+        tracing::info!("🚀 [unified_exec] exec_command_pty_service 开始执行");
+        tracing::debug!("   📝 命令: '{}', Shell: '{}', Login: {}, 显示面板: {}",
+            request.command, request.shell, request.login, request.display_in_panel);
+
+        // 获取 PtyService 桥接器
+        tracing::debug!("🔍 [unified_exec] 获取 PtyService 桥接器...");
+        let bridge_opt = self.pty_bridge.read().await;
+
+        let bridge = match bridge_opt.as_ref() {
+            Some(b) => {
+                tracing::info!("✅ [unified_exec] PtyService 桥接器已配置");
+                b
+            }
+            None => {
+                tracing::error!("❌ [unified_exec] PtyService 桥接器未配置！");
+                return Err(UnifiedExecError::Other("PtyService bridge not configured".to_string()));
+            }
+        };
+
+        // 检查 PtyService 是否可用
+        tracing::debug!("🔍 [unified_exec] 检查 PtyService 是否可用...");
+        if !bridge.is_available() {
+            // 回退到默认后端
+            tracing::warn!("⚠️ [unified_exec] PtyService 不可用，回退到默认后端");
+            return self.exec_command_default(request, context).await;
+        }
+        tracing::info!("✅ [unified_exec] PtyService 可用");
+
+        // 通过 PtyService 执行
+        tracing::info!("🎯 [unified_exec] 调用 PtyService 执行命令...");
+
+        // 从 context 中获取 connection_id（如果有）
+        let connection_id_opt = context.connection_id.as_deref();
+        if let Some(conn_id) = connection_id_opt {
+            tracing::info!("🔗 [unified_exec] 使用指定的连接: {}", conn_id);
+        } else {
+            tracing::info!("🆕 [unified_exec] 将创建新连接");
+        }
+
+        let result = match bridge.execute(
+            request.command,
+            request.shell,
+            request.login,
+            request.display_in_panel,
+            connection_id_opt,
+        ).await {
+            Ok(r) => {
+                tracing::info!("✅ [unified_exec] PtyService 执行成功");
+                tracing::debug!("   📊 会话ID: {}, 输出长度: {}, 退出码: {:?}, 面板ID: {:?}",
+                    r.session_id, r.output.len(), r.exit_code, r.panel_id);
+                r
+            }
+            Err(e) => {
+                tracing::error!("❌ [unified_exec] PtyService 执行失败: {}", e);
+                return Err(UnifiedExecError::Other(e));
+            }
+        };
+
+        // 构建响应
+        tracing::debug!("🔧 [unified_exec] 构建响应...");
+        let max_tokens = resolve_max_tokens(request.max_output_tokens);
+        let (output, original_token_count) = truncate_output_to_tokens(&result.output, max_tokens);
+
+        let response = UnifiedExecResponse {
+            event_call_id: context.call_id.clone(),
+            chunk_id: generate_chunk_id(),
+            wall_time: Duration::from_millis(100), // TODO: 获取实际执行时间
+            output,
+            session_id: result.session_id.parse().ok(),
+            exit_code: result.exit_code,
+            original_token_count,
+        };
+
+        tracing::info!("✅ [unified_exec] exec_command_pty_service 执行完成");
         Ok(response)
     }
 

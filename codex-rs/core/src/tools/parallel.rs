@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Instant;
 
 use tokio::sync::RwLock;
 use tokio_util::either::Either;
@@ -54,16 +53,13 @@ impl ToolCallRuntime {
         let turn = Arc::clone(&self.turn_context);
         let tracker = Arc::clone(&self.tracker);
         let lock = Arc::clone(&self.parallel_execution);
-        let started = Instant::now();
+        let aborted_response = Self::aborted_response(&call);
         let readiness = self.turn_context.tool_call_gate.clone();
 
         let handle: AbortOnDropHandle<Result<ResponseInputItem, FunctionCallError>> =
             AbortOnDropHandle::new(tokio::spawn(async move {
                 tokio::select! {
-                    _ = cancellation_token.cancelled() => {
-                        let secs = started.elapsed().as_secs_f32().max(0.1);
-                        Ok(Self::aborted_response(&call, secs))
-                    },
+                    _ = cancellation_token.cancelled() => Ok(aborted_response),
                     res = async {
                         tracing::info!("waiting for tool gate");
                         readiness.wait_ready().await;
@@ -75,7 +71,7 @@ impl ToolCallRuntime {
                         };
 
                         router
-                            .dispatch_tool_call(session, turn, tracker, call.clone())
+                            .dispatch_tool_call(session, turn, tracker, call)
                             .await
                     } => res,
                 }
@@ -95,32 +91,23 @@ impl ToolCallRuntime {
 }
 
 impl ToolCallRuntime {
-    fn aborted_response(call: &ToolCall, secs: f32) -> ResponseInputItem {
+    fn aborted_response(call: &ToolCall) -> ResponseInputItem {
         match &call.payload {
             ToolPayload::Custom { .. } => ResponseInputItem::CustomToolCallOutput {
                 call_id: call.call_id.clone(),
-                output: Self::abort_message(call, secs),
+                output: "aborted".to_string(),
             },
             ToolPayload::Mcp { .. } => ResponseInputItem::McpToolCallOutput {
                 call_id: call.call_id.clone(),
-                result: Err(Self::abort_message(call, secs)),
+                result: Err("aborted".to_string()),
             },
             _ => ResponseInputItem::FunctionCallOutput {
                 call_id: call.call_id.clone(),
                 output: FunctionCallOutputPayload {
-                    content: Self::abort_message(call, secs),
+                    content: "aborted".to_string(),
                     ..Default::default()
                 },
             },
-        }
-    }
-
-    fn abort_message(call: &ToolCall, secs: f32) -> String {
-        match call.tool_name.as_str() {
-            "shell" | "container.exec" | "local_shell" | "unified_exec" => {
-                format!("Wall time: {secs:.1} seconds\naborted by user")
-            }
-            _ => format!("aborted by user after {secs:.1}s"),
         }
     }
 }

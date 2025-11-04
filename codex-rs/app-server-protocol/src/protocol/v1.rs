@@ -291,6 +291,10 @@ pub struct Profile {
     pub model_reasoning_summary: Option<ReasoningSummary>,
     pub model_verbosity: Option<Verbosity>,
     pub chatgpt_base_url: Option<String>,
+    pub model_temperature: Option<f64>,
+    pub model_top_k: Option<u32>,
+    pub model_top_p: Option<f64>,
+    pub model_repetition_penalty: Option<f64>,
 }
 
 #[derive(Deserialize, Debug, Clone, PartialEq, Serialize, JsonSchema, TS)]
@@ -400,7 +404,6 @@ pub struct SessionConfiguredNotification {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
-/// Deprecated notification. Use AccountUpdatedNotification instead.
 pub struct AuthStatusChangeNotification {
     pub auth_method: Option<AuthMode>,
 }
