@@ -45,3 +45,8 @@ pub fn debug_log(msg: &str) {
         eprintln!("{}", msg);
     }
 }
+
+// Unconditional note logging to sandbox_commands.rust.log
+pub fn log_note(msg: &str, base_dir: Option<&Path>) {
+    append_line(msg, base_dir);
+}

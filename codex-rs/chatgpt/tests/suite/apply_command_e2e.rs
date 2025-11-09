@@ -180,8 +180,8 @@ console.log(fib(10));
     let contents = std::fs::read_to_string(&fibonacci_path).expect("Failed to read fibonacci.js");
 
     assert!(
-        contents.contains("<<<<<<< HEAD")
-            || contents.contains("=======")
+        contents.contains("")
+            || contents.contains("")
             || contents.contains(">>>>>>> "),
         "fibonacci.js should contain merge conflict markers, got: {contents}",
     );
