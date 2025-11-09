@@ -74,10 +74,12 @@ impl ToolHandler for ShellHandler {
                             "failed to parse function arguments: {e:?}"
                         ))
                     })?;
+                let stdin = params.stdin.clone();
                 let exec_params = Self::to_exec_params(params, turn.as_ref());
                 Self::run_exec_like(
                     tool_name.as_str(),
                     exec_params,
+                    stdin,
                     session,
                     turn,
                     tracker,
@@ -87,10 +89,12 @@ impl ToolHandler for ShellHandler {
                 .await
             }
             ToolPayload::LocalShell { params } => {
+                let stdin = params.stdin.clone();
                 let exec_params = Self::to_exec_params(params, turn.as_ref());
                 Self::run_exec_like(
                     tool_name.as_str(),
                     exec_params,
+                    stdin,
                     session,
                     turn,
                     tracker,
@@ -107,9 +111,11 @@ impl ToolHandler for ShellHandler {
 }
 
 impl ShellHandler {
+    #[allow(clippy::too_many_arguments)]
     async fn run_exec_like(
         tool_name: &str,
         exec_params: ExecParams,
+        stdin_content: Option<String>,
         session: Arc<crate::codex::Session>,
         turn: Arc<TurnContext>,
         tracker: crate::tools::context::SharedTurnDiffTracker,
@@ -246,8 +252,15 @@ impl ShellHandler {
         tracing::info!("🔍 [shell handler] 连接后的命令字符串: '{command_str}'");
         tracing::info!("🔍 [shell handler] 命令数组长度: {}, 内容: {:?}",
             exec_params.command.len(), exec_params.command);
+        if let Some(ref stdin) = stdin_content {
+            tracing::info!("🔍 [shell handler] Stdin 内容长度: {}", stdin.len());
+            tracing::info!("🔍 [shell handler] Stdin 内容（前200字符）: {:?}",
+                stdin.chars().take(200).collect::<String>());
+        } else {
+            tracing::info!("🔍 [shell handler] 无 Stdin 内容");
+        }
 
-        // 调用 unified_exec 执行命令
+        // 调用 unified_exec 执行命令，直接传递 stdin 参数
         let response = manager
             .exec_command(
                 ExecCommandRequest {
@@ -258,6 +271,7 @@ impl ShellHandler {
                     max_output_tokens: None,
                     backend: Some(ExecutionBackend::PtyService),
                     display_in_panel: true,
+                    stdin: stdin_content.as_deref(),
                 },
                 &context,
             )

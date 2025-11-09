@@ -195,6 +195,7 @@ pub trait PtyServiceBridge: Send + Sync {
     /// - `login`: 是否作为登录 shell 启动
     /// - `display_in_panel`: 是否在面板中显示输出
     /// - `connection_id`: 可选的连接 ID，如果提供则在该连接中执行，否则创建新连接
+    /// - `stdin`: 可选的标准输入内容，如果提供则在命令执行后立即写入
     ///
     /// # 返回值
     ///
@@ -206,6 +207,7 @@ pub trait PtyServiceBridge: Send + Sync {
         login: bool,
         display_in_panel: bool,
         connection_id: Option<&str>,
+        stdin: Option<&str>,
     ) -> Result<PtyServiceResult, String>;
 
     /// 写入标准输入
@@ -304,6 +306,8 @@ pub(crate) struct ExecCommandRequest<'a> {
     pub backend: Option<ExecutionBackend>,
     /// 是否在面板显示（仅 PtyService）
     pub display_in_panel: bool,
+    /// 标准输入内容（如果有）
+    pub stdin: Option<&'a str>,
 }
 
 #[derive(Debug)]
@@ -495,6 +499,7 @@ mod tests {
                     max_output_tokens: None,
                     backend: Some(ExecutionBackend::Default),  // 测试时使用默认后端
                     display_in_panel: false,  // 测试时不显示面板
+                    stdin: None,
                 },
                 &context,
             )

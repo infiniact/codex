@@ -191,3 +191,29 @@ model_repetition_penalty: None,
 
 ### 总结
 成功修复了由于添加模型生成参数导致的所有编译错误。通过系统性地检查和修复所有相关的结构体定义和初始化，确保了代码的完整性和一致性。
+
+---
+
+## 2025年11月 - 修复 ShellToolCallParams 与统一执行请求缺少 stdin 字段
+
+### 问题描述
+- 在 `protocol/src/models.rs` 的测试函数 `deserialize_shell_tool_call_params` 的断言中，`ShellToolCallParams` 初始化缺少 `stdin` 字段，触发 `E0063`。
+- 在 `core/src/unified_exec/mod.rs` 的测试辅助函数中，`ExecCommandRequest` 初始化缺少 `stdin` 字段。
+- 在 `core/src/tools/handlers/shell.rs` 方法参数较多触发 `clippy::too_many_arguments` 警告。
+
+### 修复过程
+1. 在 `protocol/src/models.rs` 的断言中补齐 `stdin: None`。
+2. 在 `core/src/unified_exec/mod.rs` 的测试辅助函数 `exec_command` 中为 `ExecCommandRequest` 补齐 `stdin: None`。
+3. 为 `core/src/tools/handlers/shell.rs` 中的 `run_exec_like` 添加 `#[allow(clippy::too_many_arguments)]` 以消除警告（函数本身参数为设计需要）。
+4. 运行 `cargo check` 验证编译通过。
+
+### 修改的文件
+- `protocol/src/models.rs`：测试断言添加 `stdin: None`
+- `core/src/unified_exec/mod.rs`：测试辅助初始化添加 `stdin: None`
+- `core/src/tools/handlers/shell.rs`：为 `run_exec_like` 添加 `#[allow(clippy::too_many_arguments)]`
+
+### 验证步骤
+- ✅ 运行 `cargo check`，所有目标编译通过
+
+### 总结
+通过补齐 `stdin` 字段并适当抑制 `clippy` 的非功能性警告，修复了编译错误 E0063 以及相关初始化问题，确保 Shell 调用参数与统一执行请求结构体的一致性。

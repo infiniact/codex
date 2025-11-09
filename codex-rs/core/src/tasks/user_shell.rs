@@ -84,6 +84,7 @@ impl SessionTask for UserShellCommandTask {
             timeout_ms: None,
             with_escalated_permissions: None,
             justification: None,
+            stdin: None,
         };
 
         let tool_call = ToolCall {

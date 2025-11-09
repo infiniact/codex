@@ -144,6 +144,7 @@ impl ToolHandler for UnifiedExecHandler {
                             max_output_tokens: args.max_output_tokens,
                             backend: Some(super::super::super::unified_exec::ExecutionBackend::PtyService),  // 默认使用 PtyService
                             display_in_panel: true,  // 默认在面板显示
+                            stdin: None,  // unified_exec 工具不支持 stdin
                         },
                         &context,
                     )

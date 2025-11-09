@@ -231,6 +231,7 @@ impl UnifiedExecSessionManager {
             request.login,
             request.display_in_panel,
             connection_id_opt,
+            request.stdin,
         ).await {
             Ok(r) => {
                 tracing::info!("✅ [unified_exec] PtyService 执行成功");

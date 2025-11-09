@@ -305,6 +305,9 @@ pub struct ShellToolCallParams {
     pub with_escalated_permissions: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub justification: Option<String>,
+    /// Optional stdin content to pass to the command
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stdin: Option<String>,
 }
 
 /// Responses API compatible content items that can be returned by a tool call.
@@ -616,6 +619,7 @@ mod tests {
                 timeout_ms: Some(1000),
                 with_escalated_permissions: None,
                 justification: None,
+                stdin: None,
             },
             params
         );
