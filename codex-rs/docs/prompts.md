@@ -240,3 +240,25 @@ model_repetition_penalty: None,
 
 ### 总结
 通过内联格式参数的方式简化了示例中的字符串格式化写法，符合 clippy 建议，提升了代码可读性与一致性。
+
+---
+
+## 2025年11月 - 修复示例格式字符串字段访问错误
+
+### 问题描述
+- `core/examples/pty_service_integration.rs` 第66行使用了 `println!("检查 PtyService 可用性: {self.service_url}");`，Rust 当前不支持在格式字符串占位符中直接进行字段访问，导致编译错误：`invalid format string: field access isn't supported`。
+
+### 修复过程
+1. 将该行改回使用位置参数：`println!("检查 PtyService 可用性: {}", self.service_url);`。
+2. 保持其他位置的内联格式参数（如 `{stdin:?}`、`{session_id}`）不变，因为这些是纯标识符捕获，合法且已通过 clippy 检查。
+3. 运行 `cargo check` 与 `cargo clippy` 验证，均通过且无警告。
+
+### 修改的文件
+- `core/examples/pty_service_integration.rs`：修正不支持的字段访问占位符为位置参数写法。
+
+### 验证步骤
+- ✅ `cargo check` 通过
+- ✅ `cargo clippy` 无警告
+
+### 总结
+字段访问不支持内联占位符捕获，使用位置参数写法可保证编译与风格一致性。示例文件现已全部通过编译与静态检查。
