@@ -217,3 +217,26 @@ model_repetition_penalty: None,
 
 ### 总结
 通过补齐 `stdin` 字段并适当抑制 `clippy` 的非功能性警告，修复了编译错误 E0063 以及相关初始化问题，确保 Shell 调用参数与统一执行请求结构体的一致性。
+
+---
+
+## 2025年11月 - 修复示例中的 Clippy uninlined_format_args 警告
+
+### 问题描述
+- `core/examples/pty_service_integration.rs` 中存在 `println!("Stdin: {:?}", stdin);` 等未内联格式参数的写法，触发 `clippy::uninlined_format_args` 警告。
+
+### 修复过程
+1. 将 `println!("Stdin: {:?}", stdin);` 修改为 `println!("Stdin: {stdin:?}");`。
+2. 将 `println!("检查 PtyService 可用性: {}", self.service_url);` 修改为 `println!("检查 PtyService 可用性: {self.service_url}");`。
+3. 将 `println!("向会话 {} 写入数据: {:?}", session_id, String::from_utf8_lossy(input));` 修改为 `println!("向会话 {session_id} 写入数据: {:?}", String::from_utf8_lossy(input));`。
+4. 运行 `cargo check` 与 `cargo clippy` 验证，无警告。
+
+### 修改的文件
+- `core/examples/pty_service_integration.rs`：优化所有可内联的格式参数
+
+### 验证步骤
+- ✅ `cargo check` 通过
+- ✅ `cargo clippy` 无警告
+
+### 总结
+通过内联格式参数的方式简化了示例中的字符串格式化写法，符合 clippy 建议，提升了代码可读性与一致性。

@@ -31,6 +31,7 @@ impl PtyServiceBridge for ExamplePtyServiceBridge {
         login: bool,
         display_in_panel: bool,
         connection_id: Option<&str>,
+        stdin: Option<&str>,
     ) -> Result<PtyServiceResult, String> {
         // 在实际实现中，这里应该调用真实的 PtyService API
         println!("执行命令通过 PtyService: {command}");
@@ -38,6 +39,7 @@ impl PtyServiceBridge for ExamplePtyServiceBridge {
         println!("登录模式: {login}");
         println!("在面板显示: {display_in_panel}");
         println!("连接 ID: {connection_id:?}");
+        println!("Stdin: {stdin:?}");
         
         // 模拟执行结果
         Ok(PtyServiceResult {
@@ -55,7 +57,7 @@ impl PtyServiceBridge for ExamplePtyServiceBridge {
 
     async fn write_stdin(&self, session_id: &str, input: &[u8]) -> Result<(), String> {
         // 在实际实现中，这里应该向指定会话写入数据
-        println!("向会话 {} 写入数据: {:?}", session_id, String::from_utf8_lossy(input));
+        println!("向会话 {session_id} 写入数据: {:?}", String::from_utf8_lossy(input));
         Ok(())
     }
 
