@@ -273,8 +273,7 @@ impl CodexMessageProcessor {
                 request_id,
                 params: _,
             } => {
-                self.send_unimplemented_error(request_id, "account/logout")
-                    .await;
+                self.logout_v2(request_id).await;
             }
             ClientRequest::CancelLoginAccount { request_id, params } => {
                 self.cancel_login_v2(request_id, params).await;
@@ -322,7 +321,7 @@ impl CodexMessageProcessor {
                 request_id,
                 params: _,
             } => {
-                self.logout_chatgpt(request_id).await;
+                self.logout_v1(request_id).await;
             }
             ClientRequest::GetAuthStatus { request_id, params } => {
                 self.get_auth_status(request_id, params).await;
@@ -771,28 +770,7 @@ impl CodexMessageProcessor {
             })
     }
 
-    async fn logout_chatgpt(&mut self, request_id: RequestId) {
-        match self.logout_common().await {
-            Ok(current_auth_method) => {
-                self.outgoing
-                    .send_response(
-                        request_id,
-                        codex_app_server_protocol::LogoutChatGptResponse {},
-                    )
-                    .await;
-
-                let payload = AuthStatusChangeNotification {
-                    auth_method: Some(current_auth_method),
-                };
-                self.outgoing
-                    .send_server_notification(ServerNotification::AuthStatusChange(payload))
-                    .await;
-            }
-            Err(error) => {
-                self.outgoing.send_error(request_id, error).await;
-            }
-        }
-    }
+    
 
     async fn logout_v1(&mut self, request_id: RequestId) {
         match self.logout_common().await {
