@@ -55,3 +55,44 @@ Create a branch named `tibo/<feature_name>`, commit the changes, and open a draf
 ```
 
 Usage: type `/prompts:draftpr` to have codex perform the work.
+## 合并 main 到 iaterm（2025-11-09）
+
+- 目标：再次将 `main` 的最新内容合并到 `iaterm` 分支。
+- 环境：Mac（本地工作区 `/Users/xudatie/Documents/Code/codex`）。
+
+### Sequential Thinking（步骤）
+- 步骤1：检查当前分支与工作区状态。
+- 步骤2：同步远端、查看分支列表。
+- 步骤3：在当前 `iaterm` 分支合并 `origin/main`。
+- 步骤4：汇总结果并记录。
+
+### 执行与输出
+- 命令：
+  ```bash
+  git branch --show-current && git status --porcelain=v1
+  ```
+  输出：
+  ```
+  iaterm
+  ```
+
+- 命令：
+  ```bash
+  git fetch origin --tags --prune && git branch -a && git merge origin/main
+  ```
+  输出（节选）：
+  ```
+  * iaterm
+    main
+    remotes/origin/HEAD -> origin/main
+    remotes/origin/iaterm
+    remotes/origin/main
+  Already up to date.
+  ```
+
+### 结论
+- 当前 `iaterm` 已与 `origin/main` 对齐，本次合并无新增提交与冲突（提示：`Already up to date.`）。
+- 如果需要后续验证，可执行：
+  - `git log --oneline iaterm..origin/main`（核对是否存在未合并的远端提交）。
+  - `cargo build` / `cargo test`（如需编译或测试验证）。
+
