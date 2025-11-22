@@ -33,18 +33,7 @@ pub struct ConfigProfile {
     /// Optional feature toggles scoped to this profile.
     #[serde(default)]
     pub features: Option<crate::features::FeaturesToml>,
-    /// Temperature parameter for controlling randomness in generation (0.0-2.0).
-    #[serde(default)]
-    pub model_temperature: Option<f64>,
-    /// Top-k sampling parameter.
-    #[serde(default)]
-    pub model_top_k: Option<u32>,
-    /// Top-p (nucleus) sampling parameter (0.0-1.0).
-    #[serde(default)]
-    pub model_top_p: Option<f64>,
-    /// Repetition penalty parameter (typically 1.0-1.2).
-    #[serde(default)]
-    pub model_repetition_penalty: Option<f64>,
+    pub oss_provider: Option<String>,
 }
 
 impl From<ConfigProfile> for codex_app_server_protocol::Profile {
@@ -57,10 +46,6 @@ impl From<ConfigProfile> for codex_app_server_protocol::Profile {
             model_reasoning_summary: config_profile.model_reasoning_summary,
             model_verbosity: config_profile.model_verbosity,
             chatgpt_base_url: config_profile.chatgpt_base_url,
-            model_temperature: config_profile.model_temperature,
-            model_top_k: config_profile.model_top_k,
-            model_top_p: config_profile.model_top_p,
-            model_repetition_penalty: config_profile.model_repetition_penalty,
         }
     }
 }

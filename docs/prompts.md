@@ -42,57 +42,87 @@ Custom prompts turn your repeatable instructions into reusable slash commands, s
 
 ### Examples
 
-**Draft PR helper**
+### Example 1: Basic named arguments
 
-`~/.codex/prompts/draftpr.md`
+**File**: `~/.codex/prompts/ticket.md`
 
 ```markdown
 ---
-description: Create feature branch, commit and open draft PR.
+description: Generate a commit message for a ticket
+argument-hint: TICKET_ID=<id> TICKET_TITLE=<title>
 ---
 
-Create a branch named `tibo/<feature_name>`, commit the changes, and open a draft PR.
+Please write a concise commit message for ticket $TICKET_ID: $TICKET_TITLE
 ```
 
-Usage: type `/prompts:draftpr` to have codex perform the work.
-## 合并 main 到 iaterm（2025-11-09）
+**Usage**:
 
-- 目标：再次将 `main` 的最新内容合并到 `iaterm` 分支。
-- 环境：Mac（本地工作区 `/Users/xudatie/Documents/Code/codex`）。
+```
+/prompts:ticket TICKET_ID=JIRA-1234 TICKET_TITLE="Fix login bug"
+```
+
+**Expanded prompt sent to Codex**:
+
+```
+Please write a concise commit message for ticket JIRA-1234: Fix login bug
+```
+
+**Note**: Both `TICKET_ID` and `TICKET_TITLE` are required. If either is missing, Codex will show a validation error. Values with spaces must be double-quoted.
+
+### Example 2: Mixed positional and named arguments
+
+**File**: `~/.codex/prompts/review.md`
+
+```markdown
+---
+description: Review code in a specific file with focus area
+argument-hint: FILE=<path> [FOCUS=<section>]
+---
+
+Review the code in $FILE. Pay special attention to $FOCUS.
+```
+
+**Usage**:
+
+```
+/prompts:review FILE=src/auth.js FOCUS="error handling"
+```
+
+**Expanded prompt**:
+
+```
+Review the code in src/auth.js. Pay special attention to error handling.
+
+```
+
+## 合并 main 到 iaterm（2025-11-22）
+
+- 目标：将 `main` 的最新提交合并到 `iaterm` 分支，并完成冲突处理。
+- 环境：Mac（工作区 `/Users/xudatie/Documents/Code/codex`）。
 
 ### Sequential Thinking（步骤）
-- 步骤1：检查当前分支与工作区状态。
-- 步骤2：同步远端、查看分支列表。
-- 步骤3：在当前 `iaterm` 分支合并 `origin/main`。
-- 步骤4：汇总结果并记录。
+- 步骤1：检查分支与远端同步状态。
+- 步骤2：更新本地 `main` 并切回 `iaterm`。
+- 步骤3：合并 `main` 到 `iaterm`。
+- 步骤4：对冲突文件采用主分支版本（除文档外），清理冲突标记。
+- 步骤5：验证构建与最终结果记录。
 
-### 执行与输出
+### 执行与输出（节选）
 - 命令：
   ```bash
-  git branch --show-current && git status --porcelain=v1
+  git fetch --all --prune && git checkout main && git pull --ff-only && git checkout iaterm && git merge --no-ff main
   ```
-  输出：
-  ```
-  iaterm
-  ```
+  结果：出现若干冲突（`Cargo.lock`、`core/*`、`tui/*`、`windows-sandbox-rs/*`、`docs/prompts.md`）。
 
-- 命令：
+- 解决策略：
+  - 代码文件统一采用 `main` 侧版本（`--theirs`），以保持与主线一致。
+  - `docs/prompts.md` 手工合并，保留主线文档并追加本次记录。
+
+- 验证：
   ```bash
-  git fetch origin --tags --prune && git branch -a && git merge origin/main
+  cargo check
   ```
-  输出（节选）：
-  ```
-  * iaterm
-    main
-    remotes/origin/HEAD -> origin/main
-    remotes/origin/iaterm
-    remotes/origin/main
-  Already up to date.
-  ```
+  构建检查完成。
 
 ### 结论
-- 当前 `iaterm` 已与 `origin/main` 对齐，本次合并无新增提交与冲突（提示：`Already up to date.`）。
-- 如果需要后续验证，可执行：
-  - `git log --oneline iaterm..origin/main`（核对是否存在未合并的远端提交）。
-  - `cargo build` / `cargo test`（如需编译或测试验证）。
-
+- 已将 `main` 合并进入 `iaterm` 并解决冲突；文档追加了本次操作记录。

@@ -1,25 +1,36 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
+use crate::codex::Session;
+use crate::codex::TurnContext;
 use crate::exec::ExecToolCallOutput;
 use crate::exec::StreamOutput;
 use crate::exec_env::create_env;
+use crate::exec_policy::create_approval_requirement_for_command;
+use crate::protocol::BackgroundEventEvent;
+use crate::protocol::EventMsg;
+use crate::protocol::ExecCommandSource;
 use crate::sandboxing::ExecEnv;
+use crate::sandboxing::SandboxPermissions;
 use crate::tools::events::ToolEmitter;
 use crate::tools::events::ToolEventCtx;
+use crate::tools::events::ToolEventFailure;
 use crate::tools::events::ToolEventStage;
 use crate::tools::orchestrator::ToolOrchestrator;
 use crate::tools::runtimes::unified_exec::UnifiedExecRequest as UnifiedExecToolRequest;
 use crate::tools::runtimes::unified_exec::UnifiedExecRuntime;
 use crate::tools::sandboxing::ToolCtx;
+use crate::truncate::TruncationPolicy;
+use crate::truncate::approx_token_count;
+use crate::truncate::formatted_truncate_text;
 
 use super::ExecCommandRequest;
-use super::ExecutionBackend;
-use super::MIN_YIELD_TIME_MS;
 use super::SessionEntry;
 use super::UnifiedExecContext;
 use super::UnifiedExecError;
@@ -30,129 +41,77 @@ use super::clamp_yield_time;
 use super::generate_chunk_id;
 use super::resolve_max_tokens;
 use super::session::OutputBuffer;
+use super::session::OutputHandles;
 use super::session::UnifiedExecSession;
-use super::truncate_output_to_tokens;
+
+struct PreparedSessionHandles {
+    writer_tx: mpsc::Sender<Vec<u8>>,
+    output_buffer: OutputBuffer,
+    output_notify: Arc<Notify>,
+    cancellation_token: CancellationToken,
+    session_ref: Arc<Session>,
+    turn_ref: Arc<TurnContext>,
+    command: Vec<String>,
+    cwd: PathBuf,
+}
 
 impl UnifiedExecSessionManager {
     pub(crate) async fn exec_command(
         &self,
-        request: ExecCommandRequest<'_>,
+        request: ExecCommandRequest,
         context: &UnifiedExecContext,
     ) -> Result<UnifiedExecResponse, UnifiedExecError> {
-        tracing::info!("🎯 [unified_exec] exec_command 开始 - 命令: '{}', 请求后端: {:?}", request.command, request.backend);
+        let cwd = request
+            .workdir
+            .clone()
+            .unwrap_or_else(|| context.turn.cwd.clone());
 
-        // 选择执行后端
-        let backend = self.select_backend(request.command, request.backend).await;
-        tracing::info!("📋 [unified_exec] 选择的执行后端: {:?}", backend);
-
-        // 根据后端执行
-        match backend {
-            ExecutionBackend::Default => {
-                tracing::info!("🔧 [unified_exec] 使用默认后端执行（带沙箱）");
-                self.exec_command_default(request, context).await
-            }
-            ExecutionBackend::PtyService => {
-                tracing::info!("🚀 [unified_exec] 使用 PtyService 后端执行");
-                self.exec_command_pty_service(request, context).await
-            }
-            ExecutionBackend::Auto => {
-                // Auto 应该已经被解析为具体的后端，使用默认
-                tracing::warn!("⚠️ [unified_exec] Auto 后端未解析，回退到默认后端");
-                self.exec_command_default(request, context).await
-            }
-        }
-    }
-
-    /// 选择执行后端
-    async fn select_backend(&self, command: &str, request_backend: Option<ExecutionBackend>) -> ExecutionBackend {
-        let config = self.config.read().await;
-
-        tracing::debug!("🔍 [unified_exec] 后端选择 - 命令: '{}', 请求后端: {:?}, 配置默认: {:?}, 强制: {}",
-            command, request_backend, config.default_backend, config.force_backend);
-
-        // 1. 如果请求指定了后端，使用它
-        if let Some(backend) = request_backend && backend != ExecutionBackend::Auto {
-            tracing::info!("✅ [unified_exec] 使用请求指定的后端: {:?}", backend);
-            return backend;
-        }
-
-        // 2. 如果配置强制使用某个后端
-        if config.force_backend && config.default_backend != ExecutionBackend::Auto {
-            tracing::info!("✅ [unified_exec] 强制使用配置的后端: {:?}", config.default_backend);
-            return config.default_backend;
-        }
-
-        // 3. 自动选择 - 简单规则
-        if request_backend == Some(ExecutionBackend::Auto) || config.default_backend == ExecutionBackend::Auto {
-            tracing::debug!("🤔 [unified_exec] 自动选择后端规则...");
-            // 交互式命令使用 PtyService
-            if command.contains("bash -i") || command.contains("sh -i") || command.contains("zsh -i") {
-                tracing::info!("✅ [unified_exec] 检测到交互式 shell，选择 PtyService");
-                return ExecutionBackend::PtyService;
-            }
-            // SSH 使用 PtyService
-            if command.starts_with("ssh ") {
-                tracing::info!("✅ [unified_exec] 检测到 SSH 命令，选择 PtyService");
-                return ExecutionBackend::PtyService;
-            }
-            // 危险命令使用默认（带沙箱）
-            if command.contains("rm -rf") || command.contains("sudo") {
-                tracing::info!("⚠️ [unified_exec] 检测到危险命令，选择默认后端（带沙箱）");
-                return ExecutionBackend::Default;
-            }
-        }
-
-        // 4. 使用配置的默认后端
-        let final_backend = if config.default_backend == ExecutionBackend::Auto {
-            tracing::info!("✅ [unified_exec] 配置为 Auto，回退到默认后端");
-            ExecutionBackend::Default
-        } else {
-            tracing::info!("✅ [unified_exec] 使用配置的默认后端: {:?}", config.default_backend);
-            config.default_backend
-        };
-
-        tracing::info!("🎯 [unified_exec] 最终选择的后端: {:?}", final_backend);
-        final_backend
-    }
-
-    /// 使用默认后端执行（原有逻辑）
-    async fn exec_command_default(
-        &self,
-        request: ExecCommandRequest<'_>,
-        context: &UnifiedExecContext,
-    ) -> Result<UnifiedExecResponse, UnifiedExecError> {
-        let shell_flag = if request.login { "-lc" } else { "-c" };
-        let command = vec![
-            request.shell.to_string(),
-            shell_flag.to_string(),
-            request.command.to_string(),
-        ];
-
-        let session = self.open_session_with_sandbox(command, context).await?;
+        let session = self
+            .open_session_with_sandbox(
+                &request.command,
+                cwd.clone(),
+                request.with_escalated_permissions,
+                request.justification,
+                context,
+            )
+            .await?;
 
         let max_tokens = resolve_max_tokens(request.max_output_tokens);
-        let yield_time_ms =
-            clamp_yield_time(Some(request.yield_time_ms.unwrap_or(MIN_YIELD_TIME_MS)));
+        let yield_time_ms = clamp_yield_time(request.yield_time_ms);
 
         let start = Instant::now();
-        let (output_buffer, output_notify) = session.output_handles();
+        let OutputHandles {
+            output_buffer,
+            output_notify,
+            cancellation_token,
+        } = session.output_handles();
         let deadline = start + Duration::from_millis(yield_time_ms);
-        let collected =
-            Self::collect_output_until_deadline(&output_buffer, &output_notify, deadline).await;
+        let collected = Self::collect_output_until_deadline(
+            &output_buffer,
+            &output_notify,
+            &cancellation_token,
+            deadline,
+        )
+        .await;
         let wall_time = Instant::now().saturating_duration_since(start);
 
         let text = String::from_utf8_lossy(&collected).to_string();
-        let (output, original_token_count) = truncate_output_to_tokens(&text, max_tokens);
+        let output = formatted_truncate_text(&text, TruncationPolicy::Tokens(max_tokens));
         let chunk_id = generate_chunk_id();
-        let exit_code = session.exit_code();
-        let session_id = if session.has_exited() {
-            None
-        } else {
-            Some(
-                self.store_session(session, context, request.command, start)
-                    .await,
-            )
-        };
+        let has_exited = session.has_exited();
+        let stored_id = self
+            .store_session(session, context, &request.command, cwd.clone(), start)
+            .await;
+        let exit_code = self
+            .sessions
+            .lock()
+            .await
+            .get(&stored_id)
+            .map(|entry| entry.session.exit_code());
+        // Only include a session_id in the response if the process is still alive.
+        let session_id = if has_exited { None } else { Some(stored_id) };
+
+        let original_token_count = approx_token_count(&text);
 
         let response = UnifiedExecResponse {
             event_call_id: context.call_id.clone(),
@@ -160,16 +119,22 @@ impl UnifiedExecSessionManager {
             wall_time,
             output,
             session_id,
-            exit_code,
-            original_token_count,
+            exit_code: exit_code.flatten(),
+            original_token_count: Some(original_token_count),
+            session_command: Some(request.command.clone()),
         };
+
+        if response.session_id.is_some() {
+            Self::emit_waiting_status(&context.session, &context.turn, &request.command).await;
+        }
 
         // If the command completed during this call, emit an ExecCommandEnd via the emitter.
         if response.session_id.is_none() {
             let exit = response.exit_code.unwrap_or(-1);
             Self::emit_exec_end_from_context(
                 context,
-                request.command.to_string(),
+                &request.command,
+                cwd,
                 response.output.clone(),
                 exit,
                 response.wall_time,
@@ -180,101 +145,53 @@ impl UnifiedExecSessionManager {
         Ok(response)
     }
 
-    /// 使用 PtyService 后端执行
-    async fn exec_command_pty_service(
-        &self,
-        request: ExecCommandRequest<'_>,
-        context: &UnifiedExecContext,
-    ) -> Result<UnifiedExecResponse, UnifiedExecError> {
-        tracing::info!("🚀 [unified_exec] exec_command_pty_service 开始执行");
-        tracing::debug!("   📝 命令: '{}', Shell: '{}', Login: {}, 显示面板: {}",
-            request.command, request.shell, request.login, request.display_in_panel);
-
-        // 获取 PtyService 桥接器
-        tracing::debug!("🔍 [unified_exec] 获取 PtyService 桥接器...");
-        let bridge_opt = self.pty_bridge.read().await;
-
-        let bridge = match bridge_opt.as_ref() {
-            Some(b) => {
-                tracing::info!("✅ [unified_exec] PtyService 桥接器已配置");
-                b
-            }
-            None => {
-                tracing::error!("❌ [unified_exec] PtyService 桥接器未配置！");
-                return Err(UnifiedExecError::Other("PtyService bridge not configured".to_string()));
-            }
-        };
-
-        // 检查 PtyService 是否可用
-        tracing::debug!("🔍 [unified_exec] 检查 PtyService 是否可用...");
-        if !bridge.is_available() {
-            // 回退到默认后端
-            tracing::warn!("⚠️ [unified_exec] PtyService 不可用，回退到默认后端");
-            return self.exec_command_default(request, context).await;
-        }
-        tracing::info!("✅ [unified_exec] PtyService 可用");
-
-        // 通过 PtyService 执行
-        tracing::info!("🎯 [unified_exec] 调用 PtyService 执行命令...");
-
-        // 从 context 中获取 connection_id（如果有）
-        let connection_id_opt = context.connection_id.as_deref();
-        if let Some(conn_id) = connection_id_opt {
-            tracing::info!("🔗 [unified_exec] 使用指定的连接: {}", conn_id);
-        } else {
-            tracing::info!("🆕 [unified_exec] 将创建新连接");
-        }
-
-        let result = match bridge.execute(
-            request.command,
-            request.shell,
-            request.login,
-            request.display_in_panel,
-            connection_id_opt,
-            request.stdin,
-        ).await {
-            Ok(r) => {
-                tracing::info!("✅ [unified_exec] PtyService 执行成功");
-                tracing::debug!("   📊 会话ID: {}, 输出长度: {}, 退出码: {:?}, 面板ID: {:?}",
-                    r.session_id, r.output.len(), r.exit_code, r.panel_id);
-                r
-            }
-            Err(e) => {
-                tracing::error!("❌ [unified_exec] PtyService 执行失败: {}", e);
-                return Err(UnifiedExecError::Other(e));
-            }
-        };
-
-        // 构建响应
-        tracing::debug!("🔧 [unified_exec] 构建响应...");
-        let max_tokens = resolve_max_tokens(request.max_output_tokens);
-        let (output, original_token_count) = truncate_output_to_tokens(&result.output, max_tokens);
-
-        let response = UnifiedExecResponse {
-            event_call_id: context.call_id.clone(),
-            chunk_id: generate_chunk_id(),
-            wall_time: Duration::from_millis(100), // TODO: 获取实际执行时间
-            output,
-            session_id: result.session_id.parse().ok(),
-            exit_code: result.exit_code,
-            original_token_count,
-        };
-
-        tracing::info!("✅ [unified_exec] exec_command_pty_service 执行完成");
-        Ok(response)
-    }
-
     pub(crate) async fn write_stdin(
         &self,
         request: WriteStdinRequest<'_>,
     ) -> Result<UnifiedExecResponse, UnifiedExecError> {
         let session_id = request.session_id;
 
-        let (writer_tx, output_buffer, output_notify) =
-            self.prepare_session_handles(session_id).await?;
+        let PreparedSessionHandles {
+            writer_tx,
+            output_buffer,
+            output_notify,
+            cancellation_token,
+            session_ref,
+            turn_ref,
+            command: session_command,
+            cwd: session_cwd,
+        } = self.prepare_session_handles(session_id).await?;
+
+        let interaction_emitter = ToolEmitter::unified_exec(
+            &session_command,
+            session_cwd.clone(),
+            ExecCommandSource::UnifiedExecInteraction,
+            (!request.input.is_empty()).then(|| request.input.to_string()),
+        );
+        let make_event_ctx = || {
+            ToolEventCtx::new(
+                session_ref.as_ref(),
+                turn_ref.as_ref(),
+                request.call_id,
+                None,
+            )
+        };
+        interaction_emitter
+            .emit(make_event_ctx(), ToolEventStage::Begin)
+            .await;
 
         if !request.input.is_empty() {
-            Self::send_input(&writer_tx, request.input.as_bytes()).await?;
+            if let Err(err) = Self::send_input(&writer_tx, request.input.as_bytes()).await {
+                interaction_emitter
+                    .emit(
+                        make_event_ctx(),
+                        ToolEventStage::Failure(ToolEventFailure::Message(format!(
+                            "write_stdin failed: {err:?}"
+                        ))),
+                    )
+                    .await;
+                return Err(err);
+            }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
@@ -282,12 +199,18 @@ impl UnifiedExecSessionManager {
         let yield_time_ms = clamp_yield_time(request.yield_time_ms);
         let start = Instant::now();
         let deadline = start + Duration::from_millis(yield_time_ms);
-        let collected =
-            Self::collect_output_until_deadline(&output_buffer, &output_notify, deadline).await;
+        let collected = Self::collect_output_until_deadline(
+            &output_buffer,
+            &output_notify,
+            &cancellation_token,
+            deadline,
+        )
+        .await;
         let wall_time = Instant::now().saturating_duration_since(start);
 
         let text = String::from_utf8_lossy(&collected).to_string();
-        let (output, original_token_count) = truncate_output_to_tokens(&text, max_tokens);
+        let output = formatted_truncate_text(&text, TruncationPolicy::Tokens(max_tokens));
+        let original_token_count = approx_token_count(&text);
         let chunk_id = generate_chunk_id();
 
         let status = self.refresh_session_state(session_id).await;
@@ -311,8 +234,28 @@ impl UnifiedExecSessionManager {
             output,
             session_id,
             exit_code,
-            original_token_count,
+            original_token_count: Some(original_token_count),
+            session_command: Some(session_command.clone()),
         };
+
+        let interaction_output = ExecToolCallOutput {
+            exit_code: response.exit_code.unwrap_or(0),
+            stdout: StreamOutput::new(response.output.clone()),
+            stderr: StreamOutput::new(String::new()),
+            aggregated_output: StreamOutput::new(response.output.clone()),
+            duration: response.wall_time,
+            timed_out: false,
+        };
+        interaction_emitter
+            .emit(
+                make_event_ctx(),
+                ToolEventStage::Success(interaction_output),
+            )
+            .await;
+
+        if response.session_id.is_some() {
+            Self::emit_waiting_status(&session_ref, &turn_ref, &session_command).await;
+        }
 
         if let (Some(exit), Some(entry)) = (response.exit_code, completion_entry) {
             let total_duration = Instant::now().saturating_duration_since(entry.started_at);
@@ -350,17 +293,27 @@ impl UnifiedExecSessionManager {
     async fn prepare_session_handles(
         &self,
         session_id: i32,
-    ) -> Result<(mpsc::Sender<Vec<u8>>, OutputBuffer, Arc<Notify>), UnifiedExecError> {
+    ) -> Result<PreparedSessionHandles, UnifiedExecError> {
         let sessions = self.sessions.lock().await;
-        let (output_buffer, output_notify, writer_tx) =
-            if let Some(entry) = sessions.get(&session_id) {
-                let (buffer, notify) = entry.session.output_handles();
-                (buffer, notify, entry.session.writer_sender())
-            } else {
-                return Err(UnifiedExecError::UnknownSessionId { session_id });
-            };
+        let entry = sessions
+            .get(&session_id)
+            .ok_or(UnifiedExecError::UnknownSessionId { session_id })?;
+        let OutputHandles {
+            output_buffer,
+            output_notify,
+            cancellation_token,
+        } = entry.session.output_handles();
 
-        Ok((writer_tx, output_buffer, output_notify))
+        Ok(PreparedSessionHandles {
+            writer_tx: entry.session.writer_sender(),
+            output_buffer,
+            output_notify,
+            cancellation_token,
+            session_ref: Arc::clone(&entry.session_ref),
+            turn_ref: Arc::clone(&entry.turn_ref),
+            command: entry.command.clone(),
+            cwd: entry.cwd.clone(),
+        })
     }
 
     async fn send_input(
@@ -377,7 +330,8 @@ impl UnifiedExecSessionManager {
         &self,
         session: UnifiedExecSession,
         context: &UnifiedExecContext,
-        command: &str,
+        command: &[String],
+        cwd: PathBuf,
         started_at: Instant,
     ) -> i32 {
         let session_id = self
@@ -388,8 +342,8 @@ impl UnifiedExecSessionManager {
             session_ref: Arc::clone(&context.session),
             turn_ref: Arc::clone(&context.turn),
             call_id: context.call_id.clone(),
-            command: command.to_string(),
-            cwd: context.turn.cwd.clone(),
+            command: command.to_vec(),
+            cwd,
             started_at,
         };
         self.sessions.lock().await.insert(session_id, entry);
@@ -416,7 +370,12 @@ impl UnifiedExecSessionManager {
             &entry.call_id,
             None,
         );
-        let emitter = ToolEmitter::unified_exec(entry.command, entry.cwd, true);
+        let emitter = ToolEmitter::unified_exec(
+            &entry.command,
+            entry.cwd,
+            ExecCommandSource::UnifiedExecStartup,
+            None,
+        );
         emitter
             .emit(event_ctx, ToolEventStage::Success(output))
             .await;
@@ -424,7 +383,8 @@ impl UnifiedExecSessionManager {
 
     async fn emit_exec_end_from_context(
         context: &UnifiedExecContext,
-        command: String,
+        command: &[String],
+        cwd: PathBuf,
         aggregated_output: String,
         exit_code: i32,
         duration: Duration,
@@ -443,9 +403,25 @@ impl UnifiedExecSessionManager {
             &context.call_id,
             None,
         );
-        let emitter = ToolEmitter::unified_exec(command, context.turn.cwd.clone(), true);
+        let emitter =
+            ToolEmitter::unified_exec(command, cwd, ExecCommandSource::UnifiedExecStartup, None);
         emitter
             .emit(event_ctx, ToolEventStage::Success(output))
+            .await;
+    }
+
+    async fn emit_waiting_status(
+        session: &Arc<Session>,
+        turn: &Arc<TurnContext>,
+        command: &[String],
+    ) {
+        let command_display = command.join(" ");
+        let message = format!("Waiting for `{command_display}`");
+        session
+            .send_event(
+                turn.as_ref(),
+                EventMsg::BackgroundEvent(BackgroundEventEvent { message }),
+            )
             .await;
     }
 
@@ -457,24 +433,42 @@ impl UnifiedExecSessionManager {
             .command
             .split_first()
             .ok_or(UnifiedExecError::MissingCommandLine)?;
-        let spawned =
-            codex_utils_pty::spawn_pty_process(program, args, env.cwd.as_path(), &env.env)
-                .await
-                .map_err(|err| UnifiedExecError::create_session(err.to_string()))?;
+
+        let spawned = codex_utils_pty::spawn_pty_process(
+            program,
+            args,
+            env.cwd.as_path(),
+            &env.env,
+            &env.arg0,
+        )
+        .await
+        .map_err(|err| UnifiedExecError::create_session(err.to_string()))?;
         UnifiedExecSession::from_spawned(spawned, env.sandbox).await
     }
 
     pub(super) async fn open_session_with_sandbox(
         &self,
-        command: Vec<String>,
+        command: &[String],
+        cwd: PathBuf,
+        with_escalated_permissions: Option<bool>,
+        justification: Option<String>,
         context: &UnifiedExecContext,
     ) -> Result<UnifiedExecSession, UnifiedExecError> {
         let mut orchestrator = ToolOrchestrator::new();
         let mut runtime = UnifiedExecRuntime::new(self);
         let req = UnifiedExecToolRequest::new(
-            command,
-            context.turn.cwd.clone(),
+            command.to_vec(),
+            cwd,
             create_env(&context.turn.shell_environment_policy),
+            with_escalated_permissions,
+            justification,
+            create_approval_requirement_for_command(
+                &context.turn.exec_policy,
+                command,
+                context.turn.approval_policy,
+                &context.turn.sandbox_policy,
+                SandboxPermissions::from(with_escalated_permissions.unwrap_or(false)),
+            ),
         );
         let tool_ctx = ToolCtx {
             session: context.session.as_ref(),
@@ -497,9 +491,13 @@ impl UnifiedExecSessionManager {
     pub(super) async fn collect_output_until_deadline(
         output_buffer: &OutputBuffer,
         output_notify: &Arc<Notify>,
+        cancellation_token: &CancellationToken,
         deadline: Instant,
     ) -> Vec<u8> {
+        const POST_EXIT_OUTPUT_GRACE: Duration = Duration::from_millis(25);
+
         let mut collected: Vec<u8> = Vec::with_capacity(4096);
+        let mut exit_signal_received = cancellation_token.is_cancelled();
         loop {
             let drained_chunks;
             let mut wait_for_output = None;
@@ -512,15 +510,27 @@ impl UnifiedExecSessionManager {
             }
 
             if drained_chunks.is_empty() {
+                exit_signal_received |= cancellation_token.is_cancelled();
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining == Duration::ZERO {
                     break;
                 }
 
                 let notified = wait_for_output.unwrap_or_else(|| output_notify.notified());
+                if exit_signal_received {
+                    let grace = remaining.min(POST_EXIT_OUTPUT_GRACE);
+                    if tokio::time::timeout(grace, notified).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+
                 tokio::pin!(notified);
+                let exit_notified = cancellation_token.cancelled();
+                tokio::pin!(exit_notified);
                 tokio::select! {
                     _ = &mut notified => {}
+                    _ = &mut exit_notified => exit_signal_received = true,
                     _ = tokio::time::sleep(remaining) => break,
                 }
                 continue;
@@ -530,6 +540,7 @@ impl UnifiedExecSessionManager {
                 collected.extend_from_slice(&chunk);
             }
 
+            exit_signal_received |= cancellation_token.is_cancelled();
             if Instant::now() >= deadline {
                 break;
             }
