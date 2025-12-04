@@ -34,14 +34,15 @@ use crate::project_doc::DEFAULT_PROJECT_DOC_FILENAME;
 use crate::project_doc::LOCAL_PROJECT_DOC_FILENAME;
 use crate::protocol::AskForApproval;
 use crate::protocol::SandboxPolicy;
+use crate::util::resolve_path;
 use codex_app_server_protocol::Tools;
 use codex_app_server_protocol::UserSavedConfig;
 use codex_protocol::config_types::ForcedLoginMethod;
-use codex_protocol::config_types::ReasoningEffort;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::SandboxMode;
 use codex_protocol::config_types::TrustLevel;
 use codex_protocol::config_types::Verbosity;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_rmcp_client::OAuthCredentialsStoreMode;
 use dirs::home_dir;
 use dunce::canonicalize;
@@ -70,7 +71,7 @@ pub const GPT_5_CODEX_MEDIUM_MODEL: &str = "gpt-5.1-codex";
 /// the context window.
 pub(crate) const PROJECT_DOC_MAX_BYTES: usize = 32 * 1024; // 32 KiB
 
-pub(crate) const CONFIG_TOML_FILE: &str = "config.toml";
+pub const CONFIG_TOML_FILE: &str = "config.toml";
 
 /// Application configuration loaded from disk and merged with overrides.
 #[derive(Debug, Clone, PartialEq)]
@@ -159,6 +160,9 @@ pub struct Config {
 
     /// Enable ASCII animations and shimmer effects in the TUI.
     pub animations: bool,
+
+    /// Show startup tooltips in the TUI welcome screen.
+    pub show_tooltips: bool,
 
     /// The directory that should be treated as the current working directory
     /// for the session. All relative paths inside the business-logic layer are
@@ -266,6 +270,11 @@ pub struct Config {
 
     /// Collection of various notices we show the user
     pub notices: Notice,
+
+    /// When `true`, checks for Codex updates on startup and surfaces update prompts.
+    /// Set to `false` only if your Codex updates are centrally managed.
+    /// Defaults to `true`.
+    pub check_for_update_on_startup: bool,
 
     /// When true, disables burst-paste detection for typed input entirely.
     /// All characters are inserted as they are received, and no buffering
@@ -705,6 +714,11 @@ pub struct ConfigToml {
     #[serde(default)]
     pub features: Option<FeaturesToml>,
 
+    /// When `true`, checks for Codex updates on startup and surfaces update prompts.
+    /// Set to `false` only if your Codex updates are centrally managed.
+    /// Defaults to `true`.
+    pub check_for_update_on_startup: Option<bool>,
+
     /// When true, disables burst-paste detection for typed input entirely.
     /// All characters are inserted as they are received, and no buffering
     /// or placeholder replacement will occur for fast keypress bursts.
@@ -1050,15 +1064,8 @@ impl Config {
         let additional_writable_roots: Vec<PathBuf> = additional_writable_roots
             .into_iter()
             .map(|path| {
-                let absolute = if path.is_absolute() {
-                    path
-                } else {
-                    resolved_cwd.join(path)
-                };
-                match canonicalize(&absolute) {
-                    Ok(canonical) => canonical,
-                    Err(_) => absolute,
-                }
+                let absolute = resolve_path(&resolved_cwd, &path);
+                canonicalize(&absolute).unwrap_or(absolute)
             })
             .collect();
         let active_project = cfg
@@ -1206,6 +1213,8 @@ impl Config {
             .or(cfg.review_model)
             .unwrap_or_else(default_review_model);
 
+        let check_for_update_on_startup = cfg.check_for_update_on_startup.unwrap_or(true);
+
         let config = Self {
             model,
             review_model,
@@ -1282,6 +1291,7 @@ impl Config {
             active_project,
             windows_wsl_setup_acknowledged: cfg.windows_wsl_setup_acknowledged.unwrap_or(false),
             notices: cfg.notice.unwrap_or_default(),
+            check_for_update_on_startup,
             disable_paste_burst: cfg.disable_paste_burst.unwrap_or(false),
             model_temperature: config_profile.model_temperature.or(cfg.model_temperature),
             model_top_k: config_profile.model_top_k.or(cfg.model_top_k),
@@ -1293,6 +1303,7 @@ impl Config {
                 .map(|t| t.notifications.clone())
                 .unwrap_or_default(),
             animations: cfg.tui.as_ref().map(|t| t.animations).unwrap_or(true),
+            show_tooltips: cfg.tui.as_ref().map(|t| t.show_tooltips).unwrap_or(true),
             otel: {
                 let t: OtelConfigToml = cfg.otel.unwrap_or_default();
                 let log_user_prompt = t.log_user_prompt.unwrap_or(false);
@@ -1334,11 +1345,7 @@ impl Config {
             return Ok(None);
         };
 
-        let full_path = if p.is_relative() {
-            cwd.join(p)
-        } else {
-            p.to_path_buf()
-        };
+        let full_path = resolve_path(cwd, p);
 
         let contents = std::fs::read_to_string(&full_path).map_err(|e| {
             std::io::Error::new(
@@ -1471,6 +1478,7 @@ persistence = "none"
         let tui = parsed.tui.expect("config should include tui section");
 
         assert_eq!(tui.notifications, Notifications::Enabled(true));
+        assert!(tui.show_tooltips);
     }
 
     #[test]
@@ -3040,6 +3048,7 @@ model_verbosity = "high"
                 active_project: ProjectConfig { trust_level: None },
                 windows_wsl_setup_acknowledged: false,
                 notices: Default::default(),
+                check_for_update_on_startup: true,
                 disable_paste_burst: false,
                 model_temperature: None,
                 model_top_k: None,
@@ -3047,6 +3056,7 @@ model_verbosity = "high"
                 model_repetition_penalty: None,
                 tui_notifications: Default::default(),
                 animations: true,
+                show_tooltips: true,
                 otel: OtelConfig::default(),
             },
             o3_profile_config
@@ -3116,9 +3126,11 @@ model_verbosity = "high"
             active_project: ProjectConfig { trust_level: None },
             windows_wsl_setup_acknowledged: false,
             notices: Default::default(),
+            check_for_update_on_startup: true,
             disable_paste_burst: false,
             tui_notifications: Default::default(),
             animations: true,
+            show_tooltips: true,
             otel: OtelConfig::default(),
             model_temperature: None,
             model_top_k: None,
@@ -3207,6 +3219,7 @@ model_verbosity = "high"
             active_project: ProjectConfig { trust_level: None },
             windows_wsl_setup_acknowledged: false,
             notices: Default::default(),
+            check_for_update_on_startup: true,
             disable_paste_burst: false,
             model_temperature: None,
             model_top_k: None,
@@ -3214,6 +3227,7 @@ model_verbosity = "high"
             model_repetition_penalty: None,
             tui_notifications: Default::default(),
             animations: true,
+            show_tooltips: true,
             otel: OtelConfig::default(),
         };
 
@@ -3288,9 +3302,11 @@ model_verbosity = "high"
             active_project: ProjectConfig { trust_level: None },
             windows_wsl_setup_acknowledged: false,
             notices: Default::default(),
+            check_for_update_on_startup: true,
             disable_paste_burst: false,
             tui_notifications: Default::default(),
             animations: true,
+            show_tooltips: true,
             otel: OtelConfig::default(),
         };
 

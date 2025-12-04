@@ -7,6 +7,7 @@ use crate::codex_conversation::CodexConversation;
 use crate::config::Config;
 use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
+use crate::openai_models::models_manager::ModelsManager;
 use crate::protocol::Event;
 use crate::protocol::EventMsg;
 use crate::protocol::SessionConfiguredEvent;
@@ -15,6 +16,7 @@ use crate::unified_exec::PtyServiceBridge;
 use codex_protocol::ConversationId;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
@@ -36,6 +38,7 @@ pub struct NewConversation {
 pub struct ConversationManager {
     conversations: Arc<RwLock<HashMap<ConversationId, Arc<CodexConversation>>>>,
     auth_manager: Arc<AuthManager>,
+    models_manager: Arc<ModelsManager>,
     session_source: SessionSource,
     /// 可选的 PtyService 桥接器，用于统一的命令执行（支持运行时修改）
     pty_bridge: Arc<RwLock<Option<Arc<dyn PtyServiceBridge>>>>,
@@ -53,7 +56,8 @@ impl ConversationManager {
     pub fn new(auth_manager: Arc<AuthManager>, session_source: SessionSource) -> Self {
         Self {
             conversations: Arc::new(RwLock::new(HashMap::new())),
-            auth_manager,
+            auth_manager: auth_manager.clone(),
+            models_manager: Arc::new(ModelsManager::new(auth_manager.get_auth_mode())),
             session_source,
             pty_bridge: Arc::new(RwLock::new(None)),
         }
@@ -89,13 +93,15 @@ impl ConversationManager {
     pub fn new_with_pty_bridge(
         auth_manager: Arc<AuthManager>,
         session_source: SessionSource,
-        pty_bridge: Arc<dyn PtyServiceBridge>
+        pty_bridge: Arc<dyn PtyServiceBridge>,
     ) -> Self {
+        let models_manager = Arc::new(ModelsManager::new(auth_manager.get_auth_mode()));
         Self {
             conversations: Arc::new(RwLock::new(HashMap::new())),
             auth_manager,
             session_source,
             pty_bridge: Arc::new(RwLock::new(Some(pty_bridge))),
+            models_manager,
         }
     }
 
@@ -154,8 +160,16 @@ impl ConversationManager {
     ///
     /// - `conversation_id`: 会话 ID
     /// - `connection_id`: 连接 ID
-    pub async fn set_conversation_connection(&self, conversation_id: ConversationId, connection_id: String) {
-        crate::unified_exec::set_global_conversation_connection(&conversation_id.to_string(), connection_id).await;
+    pub async fn set_conversation_connection(
+        &self,
+        conversation_id: ConversationId,
+        connection_id: String,
+    ) {
+        crate::unified_exec::set_global_conversation_connection(
+            &conversation_id.to_string(),
+            connection_id,
+        )
+        .await;
     }
 
     /// 获取会话的连接 ID
@@ -170,8 +184,14 @@ impl ConversationManager {
     ///
     /// - `Some(connection_id)`: 如果该会话有关联的连接
     /// - `None`: 如果该会话没有关联的连接
-    pub async fn get_conversation_connection(&self, conversation_id: &ConversationId) -> Option<String> {
+    pub async fn get_conversation_connection(
+        &self,
+        conversation_id: &ConversationId,
+    ) -> Option<String> {
         crate::unified_exec::get_global_conversation_connection(&conversation_id.to_string()).await
+    }
+    pub fn session_source(&self) -> SessionSource {
+        self.session_source.clone()
     }
 
     pub async fn new_conversation(&self, config: Config) -> CodexResult<NewConversation> {
@@ -266,7 +286,8 @@ impl ConversationManager {
             initial_history,
             self.session_source.clone(),
             pty_bridge,
-        ).await?;
+        )
+        .await?;
         self.finalize_spawn(codex, conversation_id).await
     }
 
@@ -328,9 +349,18 @@ impl ConversationManager {
             history,
             self.session_source.clone(),
             pty_bridge,
-        ).await?;
+        )
+        .await?;
 
         self.finalize_spawn(codex, conversation_id).await
+    }
+
+    pub async fn list_models(&self) -> Vec<ModelPreset> {
+        self.models_manager.available_models.read().await.clone()
+    }
+
+    pub fn get_models_manager(&self) -> Arc<ModelsManager> {
+        self.models_manager.clone()
     }
 }
 
