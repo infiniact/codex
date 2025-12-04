@@ -2732,6 +2732,7 @@ impl CodexMessageProcessor {
         }
     }
 
+    #[expect(clippy::collapsible_if, reason = "保持嵌套写法以避免 rust-analyzer E0107 误报")]
     async fn fuzzy_file_search(&mut self, request_id: RequestId, params: FuzzyFileSearchParams) {
         let FuzzyFileSearchParams {
             query,
@@ -2761,10 +2762,10 @@ impl CodexMessageProcessor {
 
         if let Some(token) = cancellation_token {
             let mut pending_fuzzy_searches = self.pending_fuzzy_searches.lock().await;
-            if let Some(current_flag) = pending_fuzzy_searches.get(&token)
-                && Arc::ptr_eq(current_flag, &cancel_flag)
-            {
-                pending_fuzzy_searches.remove(&token);
+            if let Some(current_flag) = pending_fuzzy_searches.get(&token) {
+                if Arc::as_ptr(current_flag) == Arc::as_ptr(&cancel_flag) {
+                    pending_fuzzy_searches.remove(&token);
+                }
             }
         }
 

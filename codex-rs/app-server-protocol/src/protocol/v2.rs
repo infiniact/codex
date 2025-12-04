@@ -136,6 +136,18 @@ v2_enum_from_core!(
     }
 );
 
+v2_enum_from_core!(
+    pub enum CommandRiskCategory from codex_protocol::approvals::SandboxRiskCategory {
+        DataDeletion,
+        DataExfiltration,
+        PrivilegeEscalation,
+        SystemModification,
+        NetworkAccess,
+        ResourceExhaustion,
+        Compliance
+    }
+);
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -216,6 +228,8 @@ impl From<codex_protocol::protocol::SandboxPolicy> for SandboxPolicy {
 pub struct SandboxCommandAssessment {
     pub description: String,
     pub risk_level: CommandRiskLevel,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub risk_categories: Vec<CommandRiskCategory>,
 }
 
 impl SandboxCommandAssessment {
@@ -223,6 +237,11 @@ impl SandboxCommandAssessment {
         CoreSandboxCommandAssessment {
             description: self.description,
             risk_level: self.risk_level.to_core(),
+            risk_categories: self
+                .risk_categories
+                .into_iter()
+                .map(CommandRiskCategory::to_core)
+                .collect(),
         }
     }
 }
@@ -232,6 +251,11 @@ impl From<CoreSandboxCommandAssessment> for SandboxCommandAssessment {
         Self {
             description: value.description,
             risk_level: CommandRiskLevel::from(value.risk_level),
+            risk_categories: value
+                .risk_categories
+                .into_iter()
+                .map(CommandRiskCategory::from)
+                .collect(),
         }
     }
 }

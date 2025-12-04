@@ -34,6 +34,11 @@ pub struct ConfigProfile {
     #[serde(default)]
     pub features: Option<crate::features::FeaturesToml>,
     pub oss_provider: Option<String>,
+    // Model sampling controls
+    pub model_temperature: Option<f64>,
+    pub model_top_k: Option<u32>,
+    pub model_top_p: Option<f64>,
+    pub model_repetition_penalty: Option<f64>,
 }
 
 impl From<ConfigProfile> for codex_app_server_protocol::Profile {
@@ -46,6 +51,10 @@ impl From<ConfigProfile> for codex_app_server_protocol::Profile {
             model_reasoning_summary: config_profile.model_reasoning_summary,
             model_verbosity: config_profile.model_verbosity,
             chatgpt_base_url: config_profile.chatgpt_base_url,
+            model_temperature: config_profile.model_temperature,
+            model_top_k: config_profile.model_top_k,
+            model_top_p: config_profile.model_top_p,
+            model_repetition_penalty: config_profile.model_repetition_penalty,
         }
     }
 }

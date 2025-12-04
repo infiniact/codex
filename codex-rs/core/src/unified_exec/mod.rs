@@ -125,6 +125,55 @@ pub(crate) fn generate_chunk_id() -> String {
         .collect()
 }
 
+// === iaterm compatibility shims ===
+
+#[derive(Debug, Clone)]
+pub struct PtyServiceResult {
+    pub session_id: String,
+    pub output: String,
+    pub exit_code: Option<i32>,
+    pub panel_id: Option<String>,
+    pub connection_id: String,
+}
+
+#[async_trait::async_trait]
+pub trait PtyServiceBridge: Send + Sync {
+    async fn execute(
+        &self,
+        command: &str,
+        shell: &str,
+        login: bool,
+        display_in_panel: bool,
+        connection_id: Option<&str>,
+        stdin: Option<&str>,
+    ) -> Result<PtyServiceResult, String>;
+
+    async fn write_stdin(&self, session_id: &str, input: &[u8]) -> Result<(), String>;
+
+    fn is_available(&self) -> bool;
+}
+
+static GLOBAL_CONVERSATION_CONNECTIONS: tokio::sync::OnceCell<Mutex<HashMap<String, String>>> =
+    tokio::sync::OnceCell::const_new();
+
+async fn connections() -> &'static Mutex<HashMap<String, String>> {
+    GLOBAL_CONVERSATION_CONNECTIONS
+        .get_or_init(|| async { Mutex::new(HashMap::new()) })
+        .await
+}
+
+pub async fn set_global_conversation_connection(conversation_id: &str, connection_id: String) {
+    let map = connections().await;
+    let mut guard = map.lock().await;
+    guard.insert(conversation_id.to_string(), connection_id);
+}
+
+pub async fn get_global_conversation_connection(conversation_id: &str) -> Option<String> {
+    let map = connections().await;
+    let guard = map.lock().await;
+    guard.get(conversation_id).cloned()
+}
+
 #[cfg(test)]
 #[cfg(unix)]
 mod tests {

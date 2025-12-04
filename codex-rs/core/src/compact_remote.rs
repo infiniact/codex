@@ -47,6 +47,10 @@ async fn run_remote_compact_task_inner_impl(
         parallel_tool_calls: false,
         base_instructions_override: turn_context.base_instructions.clone(),
         output_schema: None,
+        temperature: None,
+        top_k: None,
+        top_p: None,
+        repetition_penalty: None,
     };
 
     let mut new_history = turn_context

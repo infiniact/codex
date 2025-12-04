@@ -224,6 +224,16 @@ impl Codex {
         })
     }
 
+    pub async fn spawn_with_pty_bridge(
+        config: Config,
+        auth_manager: Arc<AuthManager>,
+        conversation_history: InitialHistory,
+        session_source: SessionSource,
+        _pty_bridge: Option<Arc<dyn crate::unified_exec::PtyServiceBridge>>,
+    ) -> CodexResult<CodexSpawnOk> {
+        Self::spawn(config, auth_manager, conversation_history, session_source).await
+    }
+
     /// Submit the `op` wrapped in a `Submission` with a unique ID.
     pub async fn submit(&self, op: Op) -> CodexResult<String> {
         let id = self
@@ -2076,6 +2086,10 @@ async fn run_turn(
         parallel_tool_calls,
         base_instructions_override: base_instructions,
         output_schema: turn_context.final_output_json_schema.clone(),
+        temperature: None,
+        top_k: None,
+        top_p: None,
+        repetition_penalty: None,
     };
 
     let mut retries = 0;

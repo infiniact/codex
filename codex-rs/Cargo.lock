@@ -1024,7 +1024,6 @@ dependencies = [
  "supports-color",
  "tempfile",
  "tokio",
- "toml",
  "tracing",
 ]
 
