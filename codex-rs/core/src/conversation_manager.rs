@@ -289,6 +289,7 @@ impl ConversationManager {
         } = Codex::spawn_with_pty_bridge(
             config,
             auth_manager,
+            self.models_manager.clone(),
             initial_history,
             self.session_source.clone(),
             pty_bridge,

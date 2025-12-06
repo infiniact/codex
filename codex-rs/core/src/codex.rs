@@ -235,11 +235,19 @@ impl Codex {
     pub async fn spawn_with_pty_bridge(
         config: Config,
         auth_manager: Arc<AuthManager>,
+        models_manager: Arc<ModelsManager>,
         conversation_history: InitialHistory,
         session_source: SessionSource,
         _pty_bridge: Option<Arc<dyn crate::unified_exec::PtyServiceBridge>>,
     ) -> CodexResult<CodexSpawnOk> {
-        Self::spawn(config, auth_manager, conversation_history, session_source).await
+        Self::spawn(
+            config,
+            auth_manager,
+            models_manager,
+            conversation_history,
+            session_source,
+        )
+        .await
     }
 
     /// Submit the `op` wrapped in a `Submission` with a unique ID.
