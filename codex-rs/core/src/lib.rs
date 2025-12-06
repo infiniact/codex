@@ -41,8 +41,8 @@ mod message_history;
 mod model_provider_info;
 pub mod parse_command;
 pub mod powershell;
-mod response_processing;
 pub mod sandboxing;
+mod stream_events_utils;
 mod text_encoding;
 pub mod token_data;
 mod truncate;
@@ -67,7 +67,6 @@ pub use conversation_manager::NewConversation;
 pub use auth::AuthManager;
 pub use auth::CodexAuth;
 pub mod default_client;
-pub mod model_family;
 mod openai_model_info;
 pub mod project_doc;
 mod rollout;
@@ -98,7 +97,10 @@ mod user_shell_command;
 pub mod util;
 
 pub use apply_patch::CODEX_APPLY_PATCH_ARG1;
+pub use command_safety::is_dangerous_command;
 pub use command_safety::is_safe_command;
+pub use exec_policy::ExecPolicyError;
+pub use exec_policy::load_exec_policy;
 pub use safety::get_platform_sandbox;
 // Re-export the protocol types from the standalone `codex-protocol` crate so existing
 // `codex_core::protocol::...` references continue to work across the workspace.

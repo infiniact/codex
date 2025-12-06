@@ -57,7 +57,7 @@ impl ConversationManager {
         Self {
             conversations: Arc::new(RwLock::new(HashMap::new())),
             auth_manager: auth_manager.clone(),
-            models_manager: Arc::new(ModelsManager::new(auth_manager.get_auth_mode())),
+            models_manager: Arc::new(ModelsManager::new(auth_manager)),
             session_source,
             pty_bridge: Arc::new(RwLock::new(None)),
         }
@@ -95,13 +95,13 @@ impl ConversationManager {
         session_source: SessionSource,
         pty_bridge: Arc<dyn PtyServiceBridge>,
     ) -> Self {
-        let models_manager = Arc::new(ModelsManager::new(auth_manager.get_auth_mode()));
+        let models_manager = Arc::new(ModelsManager::new(auth_manager.clone()));
         Self {
             conversations: Arc::new(RwLock::new(HashMap::new())),
             auth_manager,
+            models_manager,
             session_source,
             pty_bridge: Arc::new(RwLock::new(Some(pty_bridge))),
-            models_manager,
         }
     }
 
@@ -195,14 +195,19 @@ impl ConversationManager {
     }
 
     pub async fn new_conversation(&self, config: Config) -> CodexResult<NewConversation> {
-        self.spawn_conversation(config, self.auth_manager.clone())
-            .await
+        self.spawn_conversation(
+            config,
+            self.auth_manager.clone(),
+            self.models_manager.clone(),
+        )
+        .await
     }
 
     async fn spawn_conversation(
         &self,
         config: Config,
         auth_manager: Arc<AuthManager>,
+        models_manager: Arc<ModelsManager>,
     ) -> CodexResult<NewConversation> {
         // 获取当前的 pty_bridge
         let pty_bridge = self.pty_bridge.read().await.clone();
@@ -213,6 +218,7 @@ impl ConversationManager {
         } = Codex::spawn_with_pty_bridge(
             config,
             auth_manager,
+            models_manager,
             InitialHistory::New,
             self.session_source.clone(),
             pty_bridge,
@@ -303,6 +309,7 @@ impl ConversationManager {
         } = Codex::spawn(
             config,
             auth_manager,
+            self.models_manager.clone(),
             initial_history,
             self.session_source.clone(),
         )
@@ -346,6 +353,7 @@ impl ConversationManager {
         } = Codex::spawn_with_pty_bridge(
             config,
             auth_manager,
+            self.models_manager.clone(),
             history,
             self.session_source.clone(),
             pty_bridge,

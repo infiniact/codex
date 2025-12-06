@@ -209,6 +209,8 @@ pub struct OverriddenMetadata {
 pub struct ConfigWriteResponse {
     pub status: WriteStatus,
     pub version: String,
+    /// Canonical path to the config file that was written.
+    pub file_path: String,
     pub overridden_metadata: Option<OverriddenMetadata>,
 }
 
@@ -245,10 +247,11 @@ pub struct ConfigReadResponse {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ConfigValueWriteParams {
-    pub file_path: String,
     pub key_path: String,
     pub value: JsonValue,
     pub merge_strategy: MergeStrategy,
+    /// Path to the config file to write; defaults to the user's `config.toml` when omitted.
+    pub file_path: Option<String>,
     pub expected_version: Option<String>,
 }
 
@@ -256,8 +259,9 @@ pub struct ConfigValueWriteParams {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ConfigBatchWriteParams {
-    pub file_path: String,
     pub edits: Vec<ConfigEdit>,
+    /// Path to the config file to write; defaults to the user's `config.toml` when omitted.
+    pub file_path: Option<String>,
     pub expected_version: Option<String>,
 }
 
@@ -962,6 +966,9 @@ pub struct TurnError {
 #[ts(export_to = "v2/")]
 pub struct ErrorNotification {
     pub error: TurnError,
+    // Set to true if the error is transient and the app-server process will automatically retry.
+    // If true, this will not interrupt a turn.
+    pub will_retry: bool,
     pub thread_id: String,
     pub turn_id: String,
 }
@@ -1161,6 +1168,9 @@ pub enum ThreadItem {
         arguments: JsonValue,
         result: Option<McpToolCallResult>,
         error: Option<McpToolCallError>,
+        /// The duration of the MCP tool call in milliseconds.
+        #[ts(type = "number | null")]
+        duration_ms: Option<i64>,
     },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
@@ -1538,6 +1548,7 @@ pub struct RateLimitSnapshot {
     pub primary: Option<RateLimitWindow>,
     pub secondary: Option<RateLimitWindow>,
     pub credits: Option<CreditsSnapshot>,
+    pub plan_type: Option<PlanType>,
 }
 
 impl From<CoreRateLimitSnapshot> for RateLimitSnapshot {
@@ -1546,6 +1557,7 @@ impl From<CoreRateLimitSnapshot> for RateLimitSnapshot {
             primary: value.primary.map(RateLimitWindow::from),
             secondary: value.secondary.map(RateLimitWindow::from),
             credits: value.credits.map(CreditsSnapshot::from),
+            plan_type: value.plan_type,
         }
     }
 }
