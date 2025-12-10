@@ -298,14 +298,20 @@ impl UnifiedExecSessionManager {
         self.release_process_id(&request.process_id).await;
 
         // Emit end event
-        Self::emit_exec_end_from_context(
-            context,
-            &request.command,
+        use crate::unified_exec::CommandTranscript;
+        use tokio::sync::Mutex;
+        let transcript = Arc::new(Mutex::new(CommandTranscript::default()));
+        emit_exec_end_for_unified_exec(
+            Arc::clone(&context.session),
+            Arc::clone(&context.turn),
+            context.call_id.clone(),
+            request.command.clone(),
             cwd,
+            Some(request.process_id.clone()),
+            transcript,
             output.clone(),
             result.exit_code.unwrap_or(0),
             wall_time,
-            Some(request.process_id.clone()),
         )
         .await;
 
@@ -314,6 +320,7 @@ impl UnifiedExecSessionManager {
             chunk_id,
             wall_time,
             output,
+            raw_output: result.output.clone().into_bytes(),
             process_id: None, // Bridge commands don't have persistent sessions
             exit_code: result.exit_code,
             original_token_count: Some(original_token_count),

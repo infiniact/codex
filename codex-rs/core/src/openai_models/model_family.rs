@@ -12,7 +12,9 @@ use codex_protocol::openai_models::ConfigShellToolType;
 /// with this content.
 const BASE_INSTRUCTIONS: &str = include_str!("../../prompt.md");
 
+#[allow(dead_code)]
 const GPT_5_CODEX_INSTRUCTIONS: &str = include_str!("../../gpt_5_codex_prompt.md");
+#[allow(dead_code)]
 const GPT_5_1_INSTRUCTIONS: &str = include_str!("../../gpt_5_1_prompt.md");
 const GPT_5_1_CODEX_MAX_INSTRUCTIONS: &str = include_str!("../../gpt-5.1-codex-max_prompt.md");
 pub(crate) const CONTEXT_WINDOW_272K: i64 = 272_000;

@@ -99,6 +99,10 @@ impl ModelClient {
             .map(|w| w.saturating_mul(effective_context_window_percent) / 100)
     }
 
+    pub fn get_auto_compact_token_limit(&self) -> Option<i64> {
+        self.get_model_family().auto_compact_token_limit()
+    }
+
     pub fn config(&self) -> Arc<Config> {
         Arc::clone(&self.config)
     }
