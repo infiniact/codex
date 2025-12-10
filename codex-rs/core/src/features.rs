@@ -54,10 +54,16 @@ pub enum Feature {
     WindowsSandbox,
     /// Remote compaction enabled (only for ChatGPT auth)
     RemoteCompaction,
+    /// Refresh remote models and emit AppReady once the list is available.
+    RemoteModels,
     /// Allow model to call multiple tools in parallel (only for models supporting it).
     ParallelToolCalls,
     /// Experimental skills injection (CLI flag-driven).
     Skills,
+    /// Experimental shell snapshotting.
+    ShellSnapshot,
+    /// Experimental TUI v2 (viewport) implementation.
+    Tui2,
 }
 
 impl Feature {
@@ -283,6 +289,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: true,
     },
     FeatureSpec {
+        id: Feature::ParallelToolCalls,
+        key: "parallel",
+        stage: Stage::Stable,
+        default_enabled: true,
+    },
+    FeatureSpec {
         id: Feature::ViewImageTool,
         key: "view_image_tool",
         stage: Stage::Stable,
@@ -350,6 +362,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: true,
     },
     FeatureSpec {
+        id: Feature::RemoteModels,
+        key: "remote_models",
+        stage: Stage::Experimental,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::ParallelToolCalls,
         key: "parallel",
         stage: Stage::Experimental,
@@ -358,6 +376,18 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::Skills,
         key: "skills",
+        stage: Stage::Experimental,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::ShellSnapshot,
+        key: "shell_snapshot",
+        stage: Stage::Experimental,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::Tui2,
+        key: "tui2",
         stage: Stage::Experimental,
         default_enabled: false,
     },

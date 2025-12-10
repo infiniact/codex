@@ -519,6 +519,9 @@ pub enum EventMsg {
     /// Incremental chunk of output from a running command.
     ExecCommandOutputDelta(ExecCommandOutputDeltaEvent),
 
+    /// Terminal interaction for an in-progress command (stdin sent and stdout observed).
+    TerminalInteraction(TerminalInteractionEvent),
+
     ExecCommandEnd(ExecCommandEndEvent),
 
     /// Notification that the agent attached a local image via the view_image tool.
@@ -1353,7 +1356,7 @@ pub struct ReviewLineRange {
     pub end: u32,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[derive(Debug, Clone, Copy, Display, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecCommandSource {
     Agent,
@@ -1458,6 +1461,17 @@ pub struct ExecCommandOutputDeltaEvent {
     #[schemars(with = "String")]
     #[ts(type = "string")]
     pub chunk: Vec<u8>,
+}
+
+#[serde_as]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
+pub struct TerminalInteractionEvent {
+    /// Identifier for the ExecCommandBegin that produced this chunk.
+    pub call_id: String,
+    /// Process id associated with the running command.
+    pub process_id: String,
+    /// Stdin sent to the running session.
+    pub stdin: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]

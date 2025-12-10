@@ -46,6 +46,7 @@ use codex_core::protocol::ReviewRequest;
 use codex_core::protocol::ReviewTarget;
 use codex_core::protocol::StreamErrorEvent;
 use codex_core::protocol::TaskCompleteEvent;
+use codex_core::protocol::TerminalInteractionEvent;
 use codex_core::protocol::TokenUsage;
 use codex_core::protocol::TokenUsageInfo;
 use codex_core::protocol::TurnAbortReason;
@@ -199,8 +200,9 @@ impl RateLimitWarningState {
                 let limit_label = secondary_window_minutes
                     .map(get_limits_duration)
                     .unwrap_or_else(|| "weekly".to_string());
+                let remaining_percent = 100.0 - threshold;
                 warnings.push(format!(
-                    "Heads up, you've used over {threshold:.0}% of your {limit_label} limit. Run /status for a breakdown."
+                    "Heads up, you have less than {remaining_percent:.0}% of your {limit_label} limit left. Run /status for a breakdown."
                 ));
             }
         }
@@ -217,8 +219,9 @@ impl RateLimitWarningState {
                 let limit_label = primary_window_minutes
                     .map(get_limits_duration)
                     .unwrap_or_else(|| "5h".to_string());
+                let remaining_percent = 100.0 - threshold;
                 warnings.push(format!(
-                    "Heads up, you've used over {threshold:.0}% of your {limit_label} limit. Run /status for a breakdown."
+                    "Heads up, you have less than {remaining_percent:.0}% of your {limit_label} limit left. Run /status for a breakdown."
                 ));
             }
         }
@@ -375,6 +378,14 @@ impl ChatWidget {
     fn set_status_header(&mut self, header: String) {
         self.current_status_header = header.clone();
         self.bottom_pane.update_status_header(header);
+    }
+
+    fn restore_retry_status_header_if_present(&mut self) {
+        if let Some(header) = self.retry_status_header.take()
+            && self.current_status_header != header
+        {
+            self.set_status_header(header);
+        }
     }
 
     // --- Small event handlers ---
@@ -542,7 +553,7 @@ impl ChatWidget {
 
     fn context_remaining_percent(&self, info: &TokenUsageInfo) -> Option<i64> {
         info.model_context_window
-            .or(self.config.model_context_window)
+            .or(self.model_family.context_window)
             .map(|window| {
                 info.last_token_usage
                     .percent_of_context_window_remaining(window)
@@ -815,6 +826,10 @@ impl ChatWidget {
         // TODO: Handle streaming exec output if/when implemented
     }
 
+    fn on_terminal_interaction(&mut self, _ev: TerminalInteractionEvent) {
+        // TODO: Handle once design is ready
+    }
+
     fn on_patch_apply_begin(&mut self, event: PatchApplyBeginEvent) {
         self.add_to_history(history_cell::new_patch_event(
             event.changes,
@@ -1012,11 +1027,7 @@ impl ChatWidget {
         }
         let (command, parsed, source) = match running {
             Some(rc) => (rc.command, rc.parsed_cmd, rc.source),
-            None => (
-                vec![ev.call_id.clone()],
-                Vec::new(),
-                ExecCommandSource::Agent,
-            ),
+            None => (ev.command.clone(), ev.parsed_cmd.clone(), ev.source),
         };
         let is_unified_exec_interaction =
             matches!(source, ExecCommandSource::UnifiedExecInteraction);
@@ -1033,7 +1044,7 @@ impl ChatWidget {
                 command,
                 parsed,
                 source,
-                None,
+                ev.interaction_input.clone(),
                 self.config.animations,
             )));
         }
@@ -1771,9 +1782,15 @@ impl ChatWidget {
     /// `replay_initial_messages()`. Callers should treat `None` as a "fake" id
     /// that must not be used to correlate follow-up actions.
     fn dispatch_event_msg(&mut self, id: Option<String>, msg: EventMsg, from_replay: bool) {
+        let is_stream_error = matches!(&msg, EventMsg::StreamError(_));
+        if !is_stream_error {
+            self.restore_retry_status_header_if_present();
+        }
+
         match msg {
             EventMsg::AgentMessageDelta(_)
             | EventMsg::AgentReasoningDelta(_)
+            | EventMsg::TerminalInteraction(_)
             | EventMsg::ExecCommandOutputDelta(_) => {}
             _ => {
                 tracing::trace!("handle_codex_event: {:?}", msg);
@@ -1831,6 +1848,7 @@ impl ChatWidget {
                 self.on_elicitation_request(ev);
             }
             EventMsg::ExecCommandBegin(ev) => self.on_exec_command_begin(ev),
+            EventMsg::TerminalInteraction(delta) => self.on_terminal_interaction(delta),
             EventMsg::ExecCommandOutputDelta(delta) => self.on_exec_command_output_delta(delta),
             EventMsg::PatchApplyBegin(ev) => self.on_patch_apply_begin(ev),
             EventMsg::PatchApplyEnd(ev) => self.on_patch_apply_end(ev),
@@ -2011,6 +2029,7 @@ impl ChatWidget {
         self.add_to_history(crate::status::new_status_output(
             &self.config,
             self.auth_manager.as_ref(),
+            &self.model_family,
             total_usage,
             context_usage,
             &self.conversation_id,
@@ -2053,7 +2072,7 @@ impl ChatWidget {
     }
 
     fn lower_cost_preset(&self) -> Option<ModelPreset> {
-        let models = self.models_manager.available_models.try_read().ok()?;
+        let models = self.models_manager.try_list_models().ok()?;
         models
             .iter()
             .find(|preset| preset.model == NUDGE_MODEL_SLUG)
@@ -2156,29 +2175,121 @@ impl ChatWidget {
         });
     }
 
-    /// Open a popup to choose the model (stage 1). After selecting a model,
-    /// a second popup is shown to choose the reasoning effort.
+    /// Open a popup to choose a quick auto model. Selecting "All models"
+    /// opens the full picker with every available preset.
     pub(crate) fn open_model_popup(&mut self) {
         let current_model = self.config.model.clone();
         let presets: Vec<ModelPreset> =
             // todo(aibrahim): make this async function
-            if let Ok(models) = self.models_manager.available_models.try_read() {
-                models.clone()
-            } else {
-                self.add_info_message(
-                    "Models are being updated; please try /model again in a moment.".to_string(),
-                    None,
-                );
-                return;
+            match self.models_manager.try_list_models() {
+                Ok(models) => models,
+                Err(_) => {
+                    self.add_info_message(
+                        "Models are being updated; please try /model again in a moment."
+                            .to_string(),
+                        None,
+                    );
+                    return;
+                }
             };
 
+        let current_label = presets
+            .iter()
+            .find(|preset| preset.model == current_model)
+            .map(|preset| preset.display_name.to_string())
+            .unwrap_or_else(|| current_model.clone());
+
+        let (mut auto_presets, other_presets): (Vec<ModelPreset>, Vec<ModelPreset>) = presets
+            .into_iter()
+            .partition(|preset| Self::is_auto_model(&preset.model));
+
+        if auto_presets.is_empty() {
+            self.open_all_models_popup(other_presets);
+            return;
+        }
+
+        auto_presets.sort_by_key(|preset| Self::auto_model_order(&preset.model));
+
+        let mut items: Vec<SelectionItem> = auto_presets
+            .into_iter()
+            .map(|preset| {
+                let description =
+                    (!preset.description.is_empty()).then_some(preset.description.clone());
+                let model = preset.model.clone();
+                let actions = Self::model_selection_actions(
+                    model.clone(),
+                    Some(preset.default_reasoning_effort),
+                );
+                SelectionItem {
+                    name: preset.display_name,
+                    description,
+                    is_current: model == current_model,
+                    actions,
+                    dismiss_on_select: true,
+                    ..Default::default()
+                }
+            })
+            .collect();
+
+        if !other_presets.is_empty() {
+            let all_models = other_presets;
+            let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+                tx.send(AppEvent::OpenAllModelsPopup {
+                    models: all_models.clone(),
+                });
+            })];
+
+            let is_current = !items.iter().any(|item| item.is_current);
+            let description = Some(format!(
+                "Choose a specific model and reasoning level (current: {current_label})"
+            ));
+
+            items.push(SelectionItem {
+                name: "All models".to_string(),
+                description,
+                is_current,
+                actions,
+                dismiss_on_select: true,
+                ..Default::default()
+            });
+        }
+
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            title: Some("Select Model".to_string()),
+            subtitle: Some("Pick a quick auto mode or browse all models.".to_string()),
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            ..Default::default()
+        });
+    }
+
+    fn is_auto_model(model: &str) -> bool {
+        model.starts_with("codex-auto-")
+    }
+
+    fn auto_model_order(model: &str) -> usize {
+        match model {
+            "codex-auto-fast" => 0,
+            "codex-auto-balanced" => 1,
+            "codex-auto-thorough" => 2,
+            _ => 3,
+        }
+    }
+
+    pub(crate) fn open_all_models_popup(&mut self, presets: Vec<ModelPreset>) {
+        if presets.is_empty() {
+            self.add_info_message(
+                "No additional models are available right now.".to_string(),
+                None,
+            );
+            return;
+        }
+
+        let current_model = self.config.model.clone();
         let mut items: Vec<SelectionItem> = Vec::new();
         for preset in presets.into_iter() {
-            let description = if preset.description.is_empty() {
-                None
-            } else {
-                Some(preset.description.to_string())
-            };
+            let description =
+                (!preset.description.is_empty()).then_some(preset.description.to_string());
             let is_current = preset.model == current_model;
             let single_supported_effort = preset.supported_reasoning_efforts.len() == 1;
             let preset_for_action = preset.clone();
@@ -2208,6 +2319,36 @@ impl ChatWidget {
             items,
             ..Default::default()
         });
+    }
+
+    fn model_selection_actions(
+        model_for_action: String,
+        effort_for_action: Option<ReasoningEffortConfig>,
+    ) -> Vec<SelectionAction> {
+        vec![Box::new(move |tx| {
+            let effort_label = effort_for_action
+                .map(|effort| effort.to_string())
+                .unwrap_or_else(|| "default".to_string());
+            tx.send(AppEvent::CodexOp(Op::OverrideTurnContext {
+                cwd: None,
+                approval_policy: None,
+                sandbox_policy: None,
+                model: Some(model_for_action.clone()),
+                effort: Some(effort_for_action),
+                summary: None,
+            }));
+            tx.send(AppEvent::UpdateModel(model_for_action.clone()));
+            tx.send(AppEvent::UpdateReasoningEffort(effort_for_action));
+            tx.send(AppEvent::PersistModelSelection {
+                model: model_for_action.clone(),
+                effort: effort_for_action,
+            });
+            tracing::info!(
+                "Selected model: {}, Selected effort: {}",
+                model_for_action,
+                effort_label
+            );
+        })]
     }
 
     /// Open a popup to choose the reasoning effort (stage 2) for the given model.
@@ -2318,30 +2459,7 @@ impl ChatWidget {
             };
 
             let model_for_action = model_slug.clone();
-            let effort_for_action = choice.stored;
-            let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
-                tx.send(AppEvent::CodexOp(Op::OverrideTurnContext {
-                    cwd: None,
-                    approval_policy: None,
-                    sandbox_policy: None,
-                    model: Some(model_for_action.clone()),
-                    effort: Some(effort_for_action),
-                    summary: None,
-                }));
-                tx.send(AppEvent::UpdateModel(model_for_action.clone()));
-                tx.send(AppEvent::UpdateReasoningEffort(effort_for_action));
-                tx.send(AppEvent::PersistModelSelection {
-                    model: model_for_action.clone(),
-                    effort: effort_for_action,
-                });
-                tracing::info!(
-                    "Selected model: {}, Selected effort: {}",
-                    model_for_action,
-                    effort_for_action
-                        .map(|e| e.to_string())
-                        .unwrap_or_else(|| "default".to_string())
-                );
-            })];
+            let actions = Self::model_selection_actions(model_for_action, choice.stored);
 
             items.push(SelectionItem {
                 name: effort_label,

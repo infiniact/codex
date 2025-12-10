@@ -105,6 +105,7 @@ impl ConversationManager {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     /// Construct with a dummy AuthManager containing the provided CodexAuth.
     /// Used for integration tests: should not be used by ordinary business logic.
     pub fn with_auth(auth: CodexAuth) -> Self {
@@ -365,7 +366,7 @@ impl ConversationManager {
     }
 
     pub async fn list_models(&self) -> Vec<ModelPreset> {
-        self.models_manager.available_models.read().await.clone()
+        self.models_manager.list_models().await
     }
 
     pub fn get_models_manager(&self) -> Arc<ModelsManager> {
