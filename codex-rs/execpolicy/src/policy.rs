@@ -166,6 +166,16 @@ impl Policy {
         }
         out
     }
+
+    /// Returns the list of forbidden program regexes.
+    pub fn forbidden_program_regexes(&self) -> &[ForbiddenProgramRegex] {
+        &self.forbidden_program_regexes
+    }
+
+    /// Returns the list of forbidden substrings.
+    pub fn forbidden_substrings(&self) -> &[String] {
+        &self.forbidden_substrings
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
