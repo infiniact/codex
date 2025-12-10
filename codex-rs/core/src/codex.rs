@@ -171,6 +171,48 @@ impl Codex {
         conversation_history: InitialHistory,
         session_source: SessionSource,
     ) -> CodexResult<CodexSpawnOk> {
+        Self::spawn_internal(
+            config,
+            auth_manager,
+            models_manager,
+            conversation_history,
+            session_source,
+            None,
+        )
+        .await
+    }
+
+    /// Spawn a new [`Codex`] with an optional PTY service bridge.
+    /// The PTY bridge allows external applications (like iaterm) to handle
+    /// command execution through their own terminal infrastructure.
+    pub async fn spawn_with_pty_bridge(
+        config: Config,
+        auth_manager: Arc<AuthManager>,
+        models_manager: Arc<ModelsManager>,
+        conversation_history: InitialHistory,
+        session_source: SessionSource,
+        pty_bridge: Option<Arc<dyn crate::unified_exec::PtyServiceBridge>>,
+    ) -> CodexResult<CodexSpawnOk> {
+        Self::spawn_internal(
+            config,
+            auth_manager,
+            models_manager,
+            conversation_history,
+            session_source,
+            pty_bridge,
+        )
+        .await
+    }
+
+    /// Internal spawn implementation that accepts the PTY bridge parameter.
+    async fn spawn_internal(
+        config: Config,
+        auth_manager: Arc<AuthManager>,
+        models_manager: Arc<ModelsManager>,
+        conversation_history: InitialHistory,
+        session_source: SessionSource,
+        pty_bridge: Option<Arc<dyn crate::unified_exec::PtyServiceBridge>>,
+    ) -> CodexResult<CodexSpawnOk> {
         let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
         let (tx_event, rx_event) = async_channel::unbounded();
 
@@ -210,6 +252,7 @@ impl Codex {
             tx_event.clone(),
             conversation_history,
             session_source_clone,
+            pty_bridge,
         )
         .await
         .map_err(|e| {
@@ -230,24 +273,6 @@ impl Codex {
             codex,
             conversation_id,
         })
-    }
-
-    pub async fn spawn_with_pty_bridge(
-        config: Config,
-        auth_manager: Arc<AuthManager>,
-        models_manager: Arc<ModelsManager>,
-        conversation_history: InitialHistory,
-        session_source: SessionSource,
-        _pty_bridge: Option<Arc<dyn crate::unified_exec::PtyServiceBridge>>,
-    ) -> CodexResult<CodexSpawnOk> {
-        Self::spawn(
-            config,
-            auth_manager,
-            models_manager,
-            conversation_history,
-            session_source,
-        )
-        .await
     }
 
     /// Submit the `op` wrapped in a `Submission` with a unique ID.
@@ -278,6 +303,21 @@ impl Codex {
             .await
             .map_err(|_| CodexErr::InternalAgentDied)?;
         Ok(event)
+    }
+
+    /// 检查会话是否仍然活跃（agent loop 是否仍在运行）
+    ///
+    /// 返回 `true` 表示会话仍然活跃，可以继续发送消息
+    /// 返回 `false` 表示会话已关闭，需要重新创建会话
+    pub fn is_alive(&self) -> bool {
+        // 检查发送通道是否已关闭
+        // 如果接收端（submission_loop）已退出，通道会被关闭
+        !self.tx_sub.is_closed()
+    }
+
+    /// 检查事件接收通道是否仍然活跃
+    pub fn has_pending_events(&self) -> bool {
+        !self.rx_event.is_empty()
     }
 }
 
@@ -417,6 +457,11 @@ pub(crate) struct SessionSettingsUpdate {
 }
 
 impl Session {
+    /// Returns the conversation ID for this session.
+    pub(crate) fn get_conversation_id(&self) -> ConversationId {
+        self.conversation_id
+    }
+
     fn build_per_turn_config(session_configuration: &SessionConfiguration) -> Config {
         let config = session_configuration.original_config_do_not_use.clone();
         let mut per_turn_config = (*config).clone();
@@ -488,6 +533,7 @@ impl Session {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn new(
         session_configuration: SessionConfiguration,
         config: Arc<Config>,
@@ -496,6 +542,7 @@ impl Session {
         tx_event: Sender<Event>,
         initial_history: InitialHistory,
         session_source: SessionSource,
+        pty_bridge: Option<Arc<dyn crate::unified_exec::PtyServiceBridge>>,
     ) -> anyhow::Result<Arc<Self>> {
         debug!(
             "Configuring session: model={}; provider={:?}",
@@ -610,6 +657,7 @@ impl Session {
             otel_event_manager,
             models_manager: Arc::clone(&models_manager),
             tool_approvals: Mutex::new(ApprovalStore::default()),
+            pty_bridge,
         };
 
         let sess = Arc::new(Session {
@@ -786,6 +834,9 @@ impl Session {
         sub_id: String,
         updates: SessionSettingsUpdate,
     ) -> Arc<TurnContext> {
+        // Reset MCP call tracker at the start of each turn
+        self.reset_mcp_call_tracker().await;
+
         let session_configuration = {
             let mut state = self.state.lock().await;
             let session_configuration = state.session_configuration.clone().apply(&updates);
@@ -967,22 +1018,23 @@ impl Session {
         risk: Option<SandboxCommandAssessment>,
         proposed_execpolicy_amendment: Option<ExecPolicyAmendment>,
     ) -> ReviewDecision {
-        let sub_id = turn_context.sub_id.clone();
         // Add the tx_approve callback to the map before sending the request.
+        // 🔧 关键修复：使用 call_id 作为 key，而不是 sub_id
+        // 因为前端审批时返回的是 call_id，必须使用相同的 key 才能正确匹配
         let (tx_approve, rx_approve) = oneshot::channel();
-        let event_id = sub_id.clone();
+        let approval_key = call_id.clone();
         let prev_entry = {
             let mut active = self.active_turn.lock().await;
             match active.as_mut() {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
-                    ts.insert_pending_approval(sub_id, tx_approve)
+                    ts.insert_pending_approval(approval_key.clone(), tx_approve)
                 }
                 None => None,
             }
         };
         if prev_entry.is_some() {
-            warn!("Overwriting existing pending approval for sub_id: {event_id}");
+            warn!("Overwriting existing pending approval for call_id: {approval_key}");
         }
 
         let parsed_cmd = parse_command(&command);
@@ -1008,22 +1060,23 @@ impl Session {
         reason: Option<String>,
         grant_root: Option<PathBuf>,
     ) -> oneshot::Receiver<ReviewDecision> {
-        let sub_id = turn_context.sub_id.clone();
         // Add the tx_approve callback to the map before sending the request.
+        // 🔧 关键修复：使用 call_id 作为 key，而不是 sub_id
+        // 因为前端审批时返回的是 call_id，必须使用相同的 key 才能正确匹配
         let (tx_approve, rx_approve) = oneshot::channel();
-        let event_id = sub_id.clone();
+        let approval_key = call_id.clone();
         let prev_entry = {
             let mut active = self.active_turn.lock().await;
             match active.as_mut() {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
-                    ts.insert_pending_approval(sub_id, tx_approve)
+                    ts.insert_pending_approval(approval_key.clone(), tx_approve)
                 }
                 None => None,
             }
         };
         if prev_entry.is_some() {
-            warn!("Overwriting existing pending approval for sub_id: {event_id}");
+            warn!("Overwriting existing pending approval for call_id: {approval_key}");
         }
 
         let event = EventMsg::ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent {
@@ -1079,6 +1132,51 @@ impl Session {
         turn_context: &TurnContext,
         items: &[ResponseItem],
     ) {
+        // 🔍 DEBUG: 记录每次添加到对话历史的内容
+        if !items.is_empty() {
+            tracing::info!(
+                "📝 [Session::record_conversation_items] 添加 {} 条消息到对话历史",
+                items.len()
+            );
+            for (i, item) in items.iter().enumerate() {
+                let summary = match item {
+                    ResponseItem::Message { role, content, .. } => {
+                        let content_len: usize = content.iter().map(|c| match c {
+                            codex_protocol::models::ContentItem::OutputText { text } => text.len(),
+                            codex_protocol::models::ContentItem::InputText { text } => text.len(),
+                            codex_protocol::models::ContentItem::InputImage { .. } => 50,
+                        }).sum();
+                        format!("Message(role={role}, content_len={content_len})")
+                    }
+                    ResponseItem::FunctionCall { name, call_id, .. } => {
+                        format!("FunctionCall(name={name}, call_id={call_id})")
+                    }
+                    ResponseItem::FunctionCallOutput { call_id, output, .. } => {
+                        format!("FunctionCallOutput(call_id={call_id}, output_len={})", output.content.len())
+                    }
+                    ResponseItem::LocalShellCall { call_id, action, .. } => {
+                        let cmd = match action {
+                            codex_protocol::models::LocalShellAction::Exec(exec) => exec.command.join(" "),
+                        };
+                        let cmd_preview = if cmd.len() > 50 { format!("{}...", &cmd[..50]) } else { cmd };
+                        format!("LocalShellCall(call_id={call_id:?}, cmd={cmd_preview})")
+                    }
+                    ResponseItem::CustomToolCall { name, call_id, .. } => {
+                        format!("CustomToolCall(name={name}, call_id={call_id})")
+                    }
+                    ResponseItem::CustomToolCallOutput { call_id, output, .. } => {
+                        format!("CustomToolCallOutput(call_id={call_id}, output_len={})", output.len())
+                    }
+                    ResponseItem::Reasoning { id, .. } => format!("Reasoning(id={id})"),
+                    ResponseItem::WebSearchCall { id, .. } => format!("WebSearchCall(id={id:?})"),
+                    ResponseItem::GhostSnapshot { .. } => "GhostSnapshot".to_string(),
+                    ResponseItem::CompactionSummary { .. } => "CompactionSummary".to_string(),
+                    ResponseItem::Other => "Other".to_string(),
+                };
+                tracing::info!("  📝 [record {i}]: {summary}");
+            }
+        }
+
         self.record_into_history(items, turn_context).await;
         self.persist_rollout_response_items(items).await;
         self.send_raw_response_items(turn_context, items).await;
@@ -1244,13 +1342,11 @@ impl Session {
         };
         {
             let mut state = self.state.lock().await;
-            let mut info = state.token_info().unwrap_or(TokenUsageInfo {
-                total_token_usage: TokenUsage::default(),
-                last_token_usage: TokenUsage::default(),
-                model_context_window: None,
-            });
+            let context_window = turn_context.client.get_model_context_window();
 
-            info.last_token_usage = TokenUsage {
+            // Compact 后重新估算的 token 数作为新的累计值
+            // 这会重置 total_token_usage，使其反映 compact 后的实际上下文大小
+            let new_token_usage = TokenUsage {
                 input_tokens: 0,
                 cached_input_tokens: 0,
                 output_tokens: 0,
@@ -1258,9 +1354,11 @@ impl Session {
                 total_tokens: estimated_total_tokens.max(0),
             };
 
-            if info.model_context_window.is_none() {
-                info.model_context_window = turn_context.client.get_model_context_window();
-            }
+            let info = TokenUsageInfo {
+                total_token_usage: new_token_usage.clone(),
+                last_token_usage: new_token_usage,
+                model_context_window: context_window,
+            };
 
             state.set_token_info(Some(info));
         }
@@ -1433,7 +1531,9 @@ impl Session {
             .await
     }
 
-    pub async fn call_tool(
+    /// Calls an MCP tool with rate limit checking.
+    /// This method enforces per-tool and per-server-total call limits configured in config.toml.
+    pub async fn call_tool_with_limit_check(
         &self,
         server: &str,
         tool: &str,
@@ -1441,10 +1541,19 @@ impl Session {
     ) -> anyhow::Result<CallToolResult> {
         self.services
             .mcp_connection_manager
-            .read()
+            .write()
             .await
-            .call_tool(server, tool, arguments)
+            .call_tool_with_limit_check(server, tool, arguments)
             .await
+    }
+
+    /// Resets the MCP call tracker. Should be called at the start of each turn.
+    pub async fn reset_mcp_call_tracker(&self) {
+        self.services
+            .mcp_connection_manager
+            .write()
+            .await
+            .reset_call_tracker();
     }
 
     pub(crate) async fn parse_mcp_tool_name(&self, tool_name: &str) -> Option<(String, String)> {
@@ -1592,6 +1701,8 @@ mod handlers {
     use crate::tasks::UndoTask;
     use crate::tasks::UserShellCommandTask;
     use codex_protocol::custom_prompts::CustomPrompt;
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ResponseItem;
     use codex_protocol::protocol::CodexErrorInfo;
     use codex_protocol::protocol::ErrorEvent;
     use codex_protocol::protocol::Event;
@@ -1658,7 +1769,34 @@ mod handlers {
             .user_prompt(&items);
 
         // Attempt to inject input into current task
+        tracing::warn!("🔍 [user_input_or_turn] 尝试注入输入，items 数量: {}", items.len());
         if let Err(items) = sess.inject_input(items).await {
+            tracing::warn!("🔍 [user_input_or_turn] inject_input 返回 Err，没有活跃任务");
+
+            // 🔄 会话不活跃时，提取历史摘要并添加到对话上下文
+            let history = sess.clone_history().await.get_history();
+            tracing::warn!("📊 [user_input_or_turn] 历史记录条数: {}", history.len());
+
+            let history_summary = extract_recent_history_summary(&history, 3);
+            tracing::warn!("📊 [user_input_or_turn] 提取的摘要对数: {}", history_summary.len());
+
+            if !history_summary.is_empty() {
+                tracing::warn!("📋 [user_input_or_turn] 提取了 {} 条历史摘要", history_summary.len());
+                // 将历史摘要作为系统消息添加到对话上下文
+                let summary_text = format_history_summary(&history_summary);
+                tracing::warn!("📝 [user_input_or_turn] 摘要文本长度: {} 字符", summary_text.len());
+                let summary_item = ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText { text: summary_text }],
+                };
+                sess.record_conversation_items(&current_context, std::slice::from_ref(&summary_item))
+                    .await;
+                tracing::warn!("✅ [user_input_or_turn] 历史摘要已添加到对话上下文");
+            } else {
+                tracing::warn!("⚠️ [user_input_or_turn] 没有提取到历史摘要");
+            }
+
             if let Some(env_item) =
                 sess.build_environment_update_item(previous_context.as_ref(), &current_context)
             {
@@ -1666,10 +1804,93 @@ mod handlers {
                     .await;
             }
 
+            tracing::warn!("🚀 [user_input_or_turn] 调用 spawn_task，items 数量: {}", items.len());
             sess.spawn_task(Arc::clone(&current_context), items, RegularTask)
                 .await;
             *previous_context = Some(current_context);
+        } else {
+            tracing::warn!("✅ [user_input_or_turn] inject_input 返回 Ok，输入已注入现有任务");
         }
+    }
+
+    /// 从历史记录中提取最近的用户和助手消息摘要
+    ///
+    /// 返回最后 n 对用户/助手消息的摘要信息
+    fn extract_recent_history_summary(history: &[ResponseItem], max_pairs: usize) -> Vec<(String, String)> {
+        let mut summaries: Vec<(String, String)> = Vec::new();
+        let mut pending_assistant_msg: Option<String> = None;
+
+        tracing::warn!("🔍 [extract_recent_history_summary] 开始提取，历史条数: {}, max_pairs: {}", history.len(), max_pairs);
+
+        // 从后往前遍历历史，收集用户-助手消息对
+        // 逻辑：先找到 assistant 消息，然后向前找对应的 user 消息
+        for (idx, item) in history.iter().rev().enumerate() {
+            if let ResponseItem::Message { role, content, .. } = item {
+                let text = content.iter()
+                    .filter_map(|c| match c {
+                        ContentItem::OutputText { text } => Some(text.clone()),
+                        ContentItem::InputText { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                // 安全截断：使用 char_indices 避免 UTF-8 边界问题
+                let truncated = if text.chars().count() > 500 {
+                    let end_idx = text.char_indices()
+                        .nth(500)
+                        .map(|(i, _)| i)
+                        .unwrap_or(text.len());
+                    format!("{}...", &text[..end_idx])
+                } else {
+                    text.clone()
+                };
+
+                tracing::warn!("🔍 [extract] idx={}, role={}, text_len={}", idx, role, text.len());
+
+                if role == "assistant" && pending_assistant_msg.is_none() {
+                    // 找到助手消息，等待对应的用户消息
+                    pending_assistant_msg = Some(truncated);
+                    tracing::warn!("📝 [extract] 找到 assistant 消息，等待 user 消息配对");
+                } else if role == "user" && pending_assistant_msg.is_some() {
+                    // 找到用户消息，配对完成
+                    if let Some(assistant_msg) = pending_assistant_msg.take() {
+                        summaries.push((truncated, assistant_msg));
+                    }
+                    tracing::warn!("✅ [extract] 配对成功，当前摘要数: {}", summaries.len());
+                    if summaries.len() >= max_pairs {
+                        break;
+                    }
+                }
+            } else {
+                // 非 Message 类型的 ResponseItem
+                tracing::warn!("🔍 [extract] idx={}, 非 Message 类型", idx);
+            }
+        }
+
+        tracing::warn!("📊 [extract_recent_history_summary] 提取完成，摘要对数: {}", summaries.len());
+
+        // 反转顺序，使其按时间顺序排列
+        summaries.reverse();
+        summaries
+    }
+
+    /// 将历史摘要格式化为系统消息
+    fn format_history_summary(summaries: &[(String, String)]) -> String {
+        if summaries.is_empty() {
+            return String::new();
+        }
+
+        let mut result = String::from("<system-reminder>\nThis session is being continued from a previous conversation. Here is a summary of the recent context:\n\n");
+
+        for (i, (user_msg, assistant_msg)) in summaries.iter().enumerate() {
+            result.push_str(&format!("--- Turn {} ---\n", i + 1));
+            result.push_str(&format!("User: {user_msg}\n"));
+            result.push_str(&format!("Assistant: {assistant_msg}\n\n"));
+        }
+
+        result.push_str("Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.\n</system-reminder>");
+        result
     }
 
     pub async fn run_user_shell_command(
@@ -2043,9 +2264,42 @@ pub(crate) async fn run_task(
     input: Vec<UserInput>,
     cancellation_token: CancellationToken,
 ) -> Option<String> {
+    tracing::warn!("🔄 [run_task] ========== run_task 开始 ==========");
+    tracing::warn!("   📋 input.len(): {}", input.len());
     if input.is_empty() {
+        tracing::warn!("⚠️ [run_task] input 为空，直接返回 None");
         return None;
     }
+    tracing::warn!("✅ [run_task] input 非空，继续执行...");
+
+    // 预检查：在发送请求前检查 token 使用量，如果接近上限则先进行 compact
+    let auto_compact_limit = turn_context
+        .client
+        .get_auto_compact_token_limit();
+    let preemptive_compact_threshold = auto_compact_limit
+        .map(|limit| (limit * 80) / 100) // 使用 80% 作为预防性阈值
+        .unwrap_or(i64::MAX);
+
+    let current_tokens = sess.get_total_token_usage().await;
+
+    // 调试日志：显示 compact 相关的关键参数
+    tracing::warn!(
+        "📊 [run_task] Compact 检查: current_tokens={}, auto_compact_limit={:?}, threshold={}",
+        current_tokens, auto_compact_limit, preemptive_compact_threshold
+    );
+
+    if current_tokens >= preemptive_compact_threshold {
+        info!(
+            "Preemptive compact: current tokens ({}) >= 80% threshold ({})",
+            current_tokens, preemptive_compact_threshold
+        );
+        if should_use_remote_compact_task(&sess) {
+            run_inline_remote_auto_compact_task(sess.clone(), turn_context.clone()).await;
+        } else {
+            run_inline_auto_compact_task(sess.clone(), turn_context.clone()).await;
+        }
+    }
+
     let event = EventMsg::TaskStarted(TaskStartedEvent {
         model_context_window: turn_context.client.get_model_context_window(),
     });
@@ -2063,7 +2317,13 @@ pub(crate) async fn run_task(
     // many turns, from the perspective of the user, it is a single turn.
     let turn_diff_tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
 
+    // 追踪 ContextWindowExceeded 重试次数，防止无限循环
+    let mut context_window_retry_count = 0;
+    const MAX_CONTEXT_WINDOW_RETRIES: usize = 2;
+    let mut turn_count = 0usize;
+
     loop {
+        turn_count += 1;
         // Note that pending_input would be something like a message the user
         // submitted through the UI while the model was running. Though the UI
         // may support this, the model might not.
@@ -2081,6 +2341,42 @@ pub(crate) async fn run_task(
             sess.clone_history().await.get_history_for_prompt()
         };
 
+        // 🔍 DEBUG: 记录每轮对话的历史累积情况
+        tracing::info!(
+            "🔄 [codex::inner_loop] === 第 {} 轮对话开始 === 累积历史: {} 条消息, pending_input: {} 条",
+            turn_count,
+            turn_input.len(),
+            pending_input.len()
+        );
+        // 打印历史累积的类型统计
+        let mut user_msg_count = 0;
+        let mut assistant_msg_count = 0;
+        let mut function_call_count = 0;
+        let mut function_output_count = 0;
+        let mut other_count = 0;
+        for item in &turn_input {
+            match item {
+                ResponseItem::Message { role, .. } => {
+                    if role == "user" {
+                        user_msg_count += 1;
+                    } else if role == "assistant" {
+                        assistant_msg_count += 1;
+                    }
+                }
+                ResponseItem::FunctionCall { .. } | ResponseItem::LocalShellCall { .. } | ResponseItem::CustomToolCall { .. } => {
+                    function_call_count += 1;
+                }
+                ResponseItem::FunctionCallOutput { .. } | ResponseItem::CustomToolCallOutput { .. } => {
+                    function_output_count += 1;
+                }
+                _ => other_count += 1,
+            }
+        }
+        tracing::info!(
+            "📊 [codex::inner_loop] 历史累积统计: user_msgs={}, assistant_msgs={}, function_calls={}, function_outputs={}, others={}",
+            user_msg_count, assistant_msg_count, function_call_count, function_output_count, other_count
+        );
+
         let turn_input_messages = turn_input
             .iter()
             .filter_map(|item| match parse_turn_item(item) {
@@ -2089,6 +2385,7 @@ pub(crate) async fn run_task(
             })
             .map(|user_message| user_message.message())
             .collect::<Vec<String>>();
+        tracing::warn!("🚀 [run_task] 准备调用 run_turn，turn_input 长度: {}", turn_input_messages.len());
         match run_turn(
             Arc::clone(&sess),
             Arc::clone(&turn_context),
@@ -2099,6 +2396,7 @@ pub(crate) async fn run_task(
         .await
         {
             Ok(turn_output) => {
+                tracing::warn!("✅ [run_task] run_turn 返回成功");
                 let TurnRunResult {
                     needs_follow_up,
                     last_agent_message: turn_last_agent_message,
@@ -2146,7 +2444,49 @@ pub(crate) async fn run_task(
                 );
                 state.history.replace_last_turn_images("Invalid image");
             }
+            Err(CodexErr::ContextWindowExceeded) => {
+                // 上下文窗口超限：尝试进行 compact 后重试
+                if context_window_retry_count < MAX_CONTEXT_WINDOW_RETRIES {
+                    context_window_retry_count += 1;
+                    warn!(
+                        "Context window exceeded, attempting compact and retry ({}/{})",
+                        context_window_retry_count, MAX_CONTEXT_WINDOW_RETRIES
+                    );
+
+                    // 通知用户正在进行 compact
+                    sess
+                        .notify_background_event(
+                            turn_context.as_ref(),
+                            format!(
+                                "Context window exceeded. Compacting conversation history (attempt {context_window_retry_count}/{MAX_CONTEXT_WINDOW_RETRIES})"
+                            ),
+                        )
+                    .await;
+
+                    // 执行 compact
+                    if should_use_remote_compact_task(&sess) {
+                        run_inline_remote_auto_compact_task(sess.clone(), turn_context.clone())
+                            .await;
+                    } else {
+                        run_inline_auto_compact_task(sess.clone(), turn_context.clone()).await;
+                    }
+
+                    // compact 后继续循环重试
+                    continue;
+                } else {
+                    // 已达到最大重试次数，报告错误
+                    error!(
+                        "Context window exceeded after {} compact attempts",
+                        MAX_CONTEXT_WINDOW_RETRIES
+                    );
+                    sess.set_total_tokens_full(&turn_context).await;
+                    let event = EventMsg::Error(CodexErr::ContextWindowExceeded.to_error_event(None));
+                    sess.send_event(&turn_context, event).await;
+                    break;
+                }
+            }
             Err(e) => {
+                tracing::warn!("❌ [run_task] run_turn 返回错误: {:#}", e);
                 info!("Turn error: {e:#}");
                 let event = EventMsg::Error(e.to_error_event(None));
                 sess.send_event(&turn_context, event).await;
@@ -2166,6 +2506,9 @@ async fn run_turn(
     input: Vec<ResponseItem>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<TurnRunResult> {
+    tracing::warn!("🔄 [run_turn] ========== run_turn 开始 ==========");
+    tracing::warn!("   📋 input.len(): {}", input.len());
+
     let mcp_tools = sess
         .services
         .mcp_connection_manager
@@ -2174,6 +2517,7 @@ async fn run_turn(
         .list_all_tools()
         .or_cancel(&cancellation_token)
         .await?;
+    tracing::warn!("   🔧 mcp_tools 数量: {}", mcp_tools.len());
     let router = Arc::new(ToolRouter::from_config(
         &turn_context.tools_config,
         Some(
@@ -2183,6 +2527,7 @@ async fn run_turn(
                 .collect(),
         ),
     ));
+    tracing::warn!("   ✅ router 创建完成");
 
     let model_supports_parallel = turn_context
         .client
@@ -2210,9 +2555,11 @@ async fn run_turn(
         top_p: None,
         repetition_penalty: None,
     };
+    tracing::warn!("   📝 Prompt 创建完成，tools 数量: {}", prompt.tools.len());
 
     let mut retries = 0;
     loop {
+        tracing::warn!("   🔄 [run_turn] 调用 try_run_turn (retry: {})", retries);
         match try_run_turn(
             Arc::clone(&router),
             Arc::clone(&sess),
@@ -2232,7 +2579,8 @@ async fn run_turn(
             Err(CodexErr::EnvVar(var)) => return Err(CodexErr::EnvVar(var)),
             Err(e @ CodexErr::Fatal(_)) => return Err(e),
             Err(e @ CodexErr::ContextWindowExceeded) => {
-                sess.set_total_tokens_full(&turn_context).await;
+                // 不在这里设置 total_tokens_full，让外层 run_task 处理
+                // 这样 run_task 可以尝试 compact 后重试
                 return Err(e);
             }
             Err(CodexErr::UsageLimitReached(e)) => {
@@ -2313,6 +2661,8 @@ async fn try_run_turn(
     prompt: &Prompt,
     cancellation_token: CancellationToken,
 ) -> CodexResult<TurnRunResult> {
+    tracing::warn!("🔄 [try_run_turn] ========== 开始 ==========");
+
     let rollout_item = RolloutItem::TurnContext(TurnContextItem {
         cwd: turn_context.cwd.clone(),
         approval_policy: turn_context.approval_policy,
@@ -2323,12 +2673,40 @@ async fn try_run_turn(
     });
 
     sess.persist_rollout_items(&[rollout_item]).await;
-    let mut stream = turn_context
-        .client
-        .clone()
-        .stream(prompt)
-        .or_cancel(&cancellation_token)
-        .await??;
+    tracing::warn!("   📝 rollout_item 已持久化");
+
+    // 检查 cancellation token 状态
+    if cancellation_token.is_cancelled() {
+        tracing::warn!("   ⚠️ cancellation_token 已经被取消！");
+        return Err(CodexErr::TurnAborted);
+    }
+    tracing::warn!("   ✅ cancellation_token 未取消");
+
+    tracing::warn!("   🚀 开始调用 client.stream()...");
+    let client = turn_context.client.clone();
+    let stream_future = client.stream(prompt);
+    tracing::warn!("   📦 stream future 已创建，等待 or_cancel...");
+
+    let mut stream = match stream_future.or_cancel(&cancellation_token).await {
+        Ok(result) => {
+            tracing::warn!("   ✅ or_cancel 返回 Ok");
+            match result {
+                Ok(s) => {
+                    tracing::warn!("   ✅ stream() 返回成功");
+                    s
+                }
+                Err(e) => {
+                    tracing::warn!("   ❌ stream() 返回错误: {:?}", e);
+                    return Err(e);
+                }
+            }
+        }
+        Err(codex_async_utils::CancelErr::Cancelled) => {
+            tracing::warn!("   ⚠️ or_cancel 返回 Cancelled");
+            return Err(CodexErr::TurnAborted);
+        }
+    };
+    tracing::warn!("   ✅ stream 创建成功");
 
     let tool_runtime = ToolCallRuntime::new(
         Arc::clone(&router),
@@ -2913,6 +3291,7 @@ mod tests {
             otel_event_manager: otel_event_manager.clone(),
             models_manager,
             tool_approvals: Mutex::new(ApprovalStore::default()),
+            pty_bridge: None,
         };
 
         let turn_context = Session::make_turn_context(
@@ -2995,6 +3374,7 @@ mod tests {
             otel_event_manager: otel_event_manager.clone(),
             models_manager,
             tool_approvals: Mutex::new(ApprovalStore::default()),
+            pty_bridge: None,
         };
 
         let turn_context = Arc::new(Session::make_turn_context(

@@ -10,6 +10,7 @@ use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
 use crate::tools::spec::JsonSchema;
 use async_trait::async_trait;
+use codex_protocol::plan_tool::StepStatus;
 use codex_protocol::plan_tool::UpdatePlanArgs;
 use codex_protocol::protocol::EventMsg;
 use std::collections::BTreeMap;
@@ -104,10 +105,31 @@ pub(crate) async fn handle_update_plan(
     _call_id: String,
 ) -> Result<String, FunctionCallError> {
     let args = parse_update_plan_arguments(&arguments)?;
+
+    // Count pending and in_progress steps
+    let pending_count = args
+        .plan
+        .iter()
+        .filter(|s| matches!(s.status, StepStatus::Pending))
+        .count();
+    let in_progress_count = args
+        .plan
+        .iter()
+        .filter(|s| matches!(s.status, StepStatus::InProgress))
+        .count();
+
     session
         .send_event(turn_context, EventMsg::PlanUpdate(args))
         .await;
-    Ok("Plan updated".to_string())
+
+    // Return a message that reminds the model to continue executing pending steps
+    if pending_count > 0 || in_progress_count > 0 {
+        Ok(format!(
+            "Plan updated. {pending_count} step(s) pending, {in_progress_count} step(s) in progress. Continue executing the remaining steps."
+        ))
+    } else {
+        Ok("Plan updated. All steps completed.".to_string())
+    }
 }
 
 fn parse_update_plan_arguments(arguments: &str) -> Result<UpdatePlanArgs, FunctionCallError> {

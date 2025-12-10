@@ -199,9 +199,65 @@ impl ContextManager {
     pub(crate) fn get_total_token_usage(&self) -> i64 {
         self.token_info
             .as_ref()
-            .map(|info| info.last_token_usage.total_tokens)
+            .map(|info| info.total_token_usage.total_tokens)  // 使用累计的 total_token_usage
             .unwrap_or(0)
             .saturating_add(self.get_non_last_reasoning_items_tokens() as i64)
+    }
+
+    /// 截取历史记录使其符合指定的 token 限制。
+    /// 从最旧的记录开始删除，直到估算的 token 数量低于限制。
+    /// 返回被删除的项目数量。
+    pub(crate) fn truncate_to_token_limit(&mut self, max_tokens: i64) -> usize {
+        let mut removed_count = 0usize;
+
+        loop {
+            // 估算当前 token 数量
+            let current_tokens = self.estimate_token_count_simple();
+            if current_tokens <= max_tokens {
+                break;
+            }
+
+            // 如果只剩下很少的项目，停止截取
+            if self.items.len() <= 2 {
+                break;
+            }
+
+            // 从最旧的项目开始删除
+            self.remove_first_item();
+            removed_count += 1;
+        }
+
+        removed_count
+    }
+
+    /// 返回历史项目的数量
+    pub(crate) fn items_count(&self) -> usize {
+        self.items.len()
+    }
+
+    /// 公开版本的 token 估算
+    pub(crate) fn estimate_total_tokens(&self) -> i64 {
+        self.estimate_token_count_simple()
+    }
+
+    /// 简化版的 token 估算，不需要 TurnContext
+    fn estimate_token_count_simple(&self) -> i64 {
+        self.items.iter().fold(0i64, |acc, item| {
+            acc + match item {
+                ResponseItem::GhostSnapshot { .. } => 0,
+                ResponseItem::Reasoning {
+                    encrypted_content: Some(content),
+                    ..
+                }
+                | ResponseItem::CompactionSummary {
+                    encrypted_content: content,
+                } => estimate_reasoning_length(content.len()) as i64,
+                item => {
+                    let serialized = serde_json::to_string(item).unwrap_or_default();
+                    i64::try_from(approx_token_count(&serialized)).unwrap_or(i64::MAX)
+                }
+            }
+        })
     }
 
     /// This function enforces a couple of invariants on the in-memory history:

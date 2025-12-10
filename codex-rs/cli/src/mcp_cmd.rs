@@ -262,6 +262,8 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
         tool_timeout_sec: None,
         enabled_tools: None,
         disabled_tools: None,
+        max_calls_per_tool: None,
+        max_total_calls_per_turn: None,
     };
 
     servers.insert(name.clone(), new_entry);

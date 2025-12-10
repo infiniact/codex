@@ -23,6 +23,7 @@ use tokio::time::timeout;
 use tokio_util::io::ReaderStream;
 use tracing::debug;
 use tracing::trace;
+use tracing::warn;
 
 /// Streams SSE events from an on-disk fixture for tests.
 pub fn stream_from_fixture(
@@ -137,6 +138,9 @@ pub async fn process_sse(
     let mut stream = stream.eventsource();
     let mut response_completed: Option<ResponseCompleted> = None;
     let mut response_error: Option<ApiError> = None;
+    let mut event_count: u64 = 0;
+
+    debug!("📥 [process_sse] 开始处理 SSE 流, idle_timeout: {:?}", idle_timeout);
 
     loop {
         let start = Instant::now();
@@ -147,13 +151,22 @@ pub async fn process_sse(
         let sse = match response {
             Ok(Some(Ok(sse))) => sse,
             Ok(Some(Err(e))) => {
-                debug!("SSE Error: {e:#}");
+                debug!("❌ [process_sse] SSE 错误: {e:#}");
                 let _ = tx_event.send(Err(ApiError::Stream(e.to_string()))).await;
                 return;
             }
             Ok(None) => {
+                debug!("📥 [process_sse] SSE 流结束, 共处理 {} 个事件", event_count);
                 match response_completed.take() {
                     Some(ResponseCompleted { id, usage }) => {
+                        debug!(
+                            "✅ [process_sse] 响应完成 - id: {}, usage: {:?}",
+                            id,
+                            usage.as_ref().map(|u| format!(
+                                "input={}, output={}, total={}",
+                                u.input_tokens, u.output_tokens, u.total_tokens
+                            ))
+                        );
                         let event = ResponseEvent::Completed {
                             response_id: id,
                             token_usage: usage.map(Into::into),
@@ -164,12 +177,14 @@ pub async fn process_sse(
                         let error = response_error.unwrap_or(ApiError::Stream(
                             "stream closed before response.completed".into(),
                         ));
+                        warn!("⚠️ [process_sse] 流意外结束: {:?}", error);
                         let _ = tx_event.send(Err(error)).await;
                     }
                 }
                 return;
             }
             Err(_) => {
+                warn!("⚠️ [process_sse] SSE 空闲超时");
                 let _ = tx_event
                     .send(Err(ApiError::Stream("idle timeout waiting for SSE".into())))
                     .await;
@@ -177,13 +192,24 @@ pub async fn process_sse(
             }
         };
 
+        event_count += 1;
         let raw = sse.data.clone();
         trace!("SSE event: {raw}");
+
+        // 🔍 DEBUG: 记录每个 SSE 事件（前10个详细记录，之后每10个记录一次）
+        if event_count <= 10 || event_count.is_multiple_of(10) {
+            let preview = if raw.len() > 500 {
+                format!("{}...(truncated, {} bytes)", &raw[..500], raw.len())
+            } else {
+                raw.clone()
+            };
+            debug!("📥 [process_sse] 事件[{}] type={}: {}", event_count, sse.event, preview);
+        }
 
         let event: SseEvent = match serde_json::from_str(&sse.data) {
             Ok(event) => event,
             Err(e) => {
-                debug!("Failed to parse SSE event: {e}, data: {}", &sse.data);
+                debug!("⚠️ [process_sse] 解析 SSE 事件失败: {e}, data: {}", &sse.data);
                 continue;
             }
         };
@@ -191,10 +217,100 @@ pub async fn process_sse(
         match event.kind.as_str() {
             "response.output_item.done" => {
                 let Some(item_val) = event.item else { continue };
-                let Ok(item) = serde_json::from_value::<ResponseItem>(item_val) else {
-                    debug!("failed to parse ResponseItem from output_item.done");
+                let Ok(item) = serde_json::from_value::<ResponseItem>(item_val.clone()) else {
+                    debug!("⚠️ [process_sse] 解析 ResponseItem 失败 from output_item.done");
                     continue;
                 };
+
+                // 🔍 DEBUG: 记录输出项的详细信息
+                let item_summary = match &item {
+                    ResponseItem::Message { role, content, .. } => {
+                        let content_preview: String = content.iter().map(|c| {
+                            match c {
+                                codex_protocol::models::ContentItem::OutputText { text } => {
+                                    if text.len() > 200 {
+                                        format!("text({}...)", &text[..200])
+                                    } else {
+                                        format!("text({text})")
+                                    }
+                                }
+                                codex_protocol::models::ContentItem::InputText { text } => {
+                                    if text.len() > 50 {
+                                        format!("input_text({}...)", &text[..50])
+                                    } else {
+                                        format!("input_text({text})")
+                                    }
+                                }
+                                codex_protocol::models::ContentItem::InputImage { .. } => "input_image".to_string(),
+                            }
+                        }).collect::<Vec<_>>().join(", ");
+                        format!("Message(role={role}, content=[{content_preview}])")
+                    }
+                    ResponseItem::Reasoning { id, summary, .. } => {
+                        let summary_preview: String = summary.iter().map(|part| {
+                            match part {
+                                codex_protocol::models::ReasoningItemReasoningSummary::SummaryText { text } => {
+                                    if text.len() > 100 {
+                                        format!("{}...", &text[..100])
+                                    } else {
+                                        text.clone()
+                                    }
+                                }
+                            }
+                        }).collect::<Vec<_>>().join("; ");
+                        format!("Reasoning(id={id}, summary={summary_preview})")
+                    }
+                    ResponseItem::FunctionCall { name, call_id, arguments, .. } => {
+                        let args_preview = if arguments.len() > 100 {
+                            format!("{}...", &arguments[..100])
+                        } else {
+                            arguments.clone()
+                        };
+                        format!("FunctionCall(name={name}, call_id={call_id}, args={args_preview})")
+                    }
+                    ResponseItem::LocalShellCall { call_id, action, .. } => {
+                        let cmd_preview = match action {
+                            codex_protocol::models::LocalShellAction::Exec(exec) => {
+                                let cmd = exec.command.join(" ");
+                                if cmd.len() > 100 {
+                                    format!("{}...", &cmd[..100])
+                                } else {
+                                    cmd
+                                }
+                            }
+                        };
+                        format!("LocalShellCall(call_id={call_id:?}, cmd={cmd_preview})")
+                    }
+                    ResponseItem::CustomToolCall { name, call_id, input, .. } => {
+                        let input_preview = if input.len() > 100 {
+                            format!("{}...", &input[..100])
+                        } else {
+                            input.clone()
+                        };
+                        format!("CustomToolCall(name={name}, call_id={call_id}, input={input_preview})")
+                    }
+                    ResponseItem::WebSearchCall { id, status, .. } => format!("WebSearchCall(id={id:?}, status={status:?})"),
+                    ResponseItem::FunctionCallOutput { call_id, output } => {
+                        let output_preview = if output.content.len() > 100 {
+                            format!("{}...", &output.content[..100])
+                        } else {
+                            output.content.clone()
+                        };
+                        format!("FunctionCallOutput(call_id={call_id}, output={output_preview})")
+                    }
+                    ResponseItem::CustomToolCallOutput { call_id, output } => {
+                        let output_preview = if output.len() > 100 {
+                            format!("{}...", &output[..100])
+                        } else {
+                            output.clone()
+                        };
+                        format!("CustomToolCallOutput(call_id={call_id}, output={output_preview})")
+                    }
+                    ResponseItem::GhostSnapshot { .. } => "GhostSnapshot".to_string(),
+                    ResponseItem::CompactionSummary { .. } => "CompactionSummary".to_string(),
+                    ResponseItem::Other => "Other".to_string(),
+                };
+                debug!("📥 [process_sse] output_item.done: {}", item_summary);
 
                 let event = ResponseEvent::OutputItemDone(item);
                 if tx_event.send(Ok(event)).await.is_err() {
@@ -203,6 +319,14 @@ pub async fn process_sse(
             }
             "response.output_text.delta" => {
                 if let Some(delta) = event.delta {
+                    // 记录文本增量（仅前50字符）
+                    let delta_preview = if delta.len() > 50 {
+                        format!("{}...", &delta[..50])
+                    } else {
+                        delta.clone()
+                    };
+                    trace!("📥 [process_sse] output_text.delta: {delta_preview}");
+
                     let event = ResponseEvent::OutputTextDelta(delta);
                     if tx_event.send(Ok(event)).await.is_err() {
                         return;
@@ -211,6 +335,9 @@ pub async fn process_sse(
             }
             "response.reasoning_summary_text.delta" => {
                 if let (Some(delta), Some(summary_index)) = (event.delta, event.summary_index) {
+                    trace!("📥 [process_sse] reasoning_summary_text.delta[{}]: {}...",
+                           summary_index,
+                           delta.chars().take(50).collect::<String>());
                     let event = ResponseEvent::ReasoningSummaryDelta {
                         delta,
                         summary_index,
@@ -222,6 +349,9 @@ pub async fn process_sse(
             }
             "response.reasoning_text.delta" => {
                 if let (Some(delta), Some(content_index)) = (event.delta, event.content_index) {
+                    trace!("📥 [process_sse] reasoning_text.delta[{}]: {}...",
+                           content_index,
+                           delta.chars().take(50).collect::<String>());
                     let event = ResponseEvent::ReasoningContentDelta {
                         delta,
                         content_index,
@@ -233,17 +363,21 @@ pub async fn process_sse(
             }
             "response.created" => {
                 if event.response.is_some() {
+                    debug!("📥 [process_sse] response.created");
                     let _ = tx_event.send(Ok(ResponseEvent::Created {})).await;
                 }
             }
             "response.failed" => {
                 if let Some(resp_val) = event.response {
+                    debug!("❌ [process_sse] response.failed: {:?}", resp_val);
                     response_error =
                         Some(ApiError::Stream("response.failed event received".into()));
 
                     if let Some(error) = resp_val.get("error")
                         && let Ok(error) = serde_json::from_value::<Error>(error.clone())
                     {
+                        debug!("❌ [process_sse] 错误详情 - code: {:?}, message: {:?}",
+                               error.code, error.message);
                         if is_context_window_error(&error) {
                             response_error = Some(ApiError::ContextWindowExceeded);
                         } else if is_quota_exceeded_error(&error) {
@@ -260,13 +394,26 @@ pub async fn process_sse(
             }
             "response.completed" => {
                 if let Some(resp_val) = event.response {
+                    debug!("📥 [process_sse] response.completed: {:?}", resp_val);
                     match serde_json::from_value::<ResponseCompleted>(resp_val) {
                         Ok(r) => {
+                            debug!(
+                                "✅ [process_sse] 解析完成响应 - id: {}, usage: {:?}",
+                                r.id,
+                                r.usage.as_ref().map(|u| format!(
+                                    "input={}, output={}, cached={:?}, reasoning={:?}, total={}",
+                                    u.input_tokens,
+                                    u.output_tokens,
+                                    u.input_tokens_details.as_ref().map(|d| d.cached_tokens),
+                                    u.output_tokens_details.as_ref().map(|d| d.reasoning_tokens),
+                                    u.total_tokens
+                                ))
+                            );
                             response_completed = Some(r);
                         }
                         Err(e) => {
                             let error = format!("failed to parse ResponseCompleted: {e}");
-                            debug!(error);
+                            debug!("⚠️ [process_sse] {}", error);
                             response_error = Some(ApiError::Stream(error));
                             continue;
                         }
@@ -276,9 +423,14 @@ pub async fn process_sse(
             "response.output_item.added" => {
                 let Some(item_val) = event.item else { continue };
                 let Ok(item) = serde_json::from_value::<ResponseItem>(item_val) else {
-                    debug!("failed to parse ResponseItem from output_item.done");
+                    debug!("⚠️ [process_sse] 解析 ResponseItem 失败 from output_item.added");
                     continue;
                 };
+
+                debug!(
+                    "📥 [process_sse] output_item.added: {:?}",
+                    format!("{item:?}").chars().take(200).collect::<String>()
+                );
 
                 let event = ResponseEvent::OutputItemAdded(item);
                 if tx_event.send(Ok(event)).await.is_err() {
@@ -287,13 +439,17 @@ pub async fn process_sse(
             }
             "response.reasoning_summary_part.added" => {
                 if let Some(summary_index) = event.summary_index {
+                    debug!("📥 [process_sse] reasoning_summary_part.added[{}]", summary_index);
                     let event = ResponseEvent::ReasoningSummaryPartAdded { summary_index };
                     if tx_event.send(Ok(event)).await.is_err() {
                         return;
                     }
                 }
             }
-            _ => {}
+            _ => {
+                // 记录未知事件类型
+                debug!("📥 [process_sse] 未处理的事件类型: {}", event.kind);
+            }
         }
     }
 }

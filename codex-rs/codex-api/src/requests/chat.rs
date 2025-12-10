@@ -309,12 +309,45 @@ impl<'a> ChatRequestBuilder<'a> {
             }
         }
 
-        let payload = json!({
+        // 检查是否有 user 消息
+        // 智谱 GLM API 要求 messages 中必须包含至少一条 user 角色的消息
+        let has_user_message = messages.iter().any(|m| {
+            m.get("role").and_then(|r| r.as_str()) == Some("user")
+        });
+
+        if !has_user_message {
+            tracing::warn!(
+                "⚠️ [ChatRequestBuilder::build] messages 中没有 user 消息，GLM API 可能会报错 1213"
+            );
+            // 添加一条空的 user 消息，防止 GLM API 报错
+            // 注意：这是一个临时解决方案，真正的问题应该在上层解决
+            messages.push(json!({"role": "user", "content": "请继续"}));
+            tracing::warn!(
+                "⚠️ [ChatRequestBuilder::build] 已添加默认 user 消息"
+            );
+        }
+
+        // 构建基础 payload
+        let mut payload = json!({
             "model": self.model,
             "messages": messages,
             "stream": true,
-            "tools": self.tools,
         });
+
+        // 只有当 tools 非空时才添加 tools 参数
+        // 智谱 GLM API 等不兼容空 tools 数组，会导致 1213 错误
+        if !self.tools.is_empty() {
+            payload["tools"] = json!(self.tools);
+        }
+
+        // 🔍 DEBUG: 打印构建的请求体
+        tracing::debug!(
+            "📤 [ChatRequestBuilder::build] model={}, messages_count={}, tools_count={}, has_tools_in_payload={}",
+            self.model,
+            messages.len(),
+            self.tools.len(),
+            payload.get("tools").is_some()
+        );
 
         let mut headers = build_conversation_headers(self.conversation_id);
         if let Some(subagent) = subagent_header(&self.session_source) {

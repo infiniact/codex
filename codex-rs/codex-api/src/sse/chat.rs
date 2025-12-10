@@ -6,6 +6,7 @@ use codex_client::StreamResponse;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::TokenUsage;
 use eventsource_stream::Eventsource;
 use futures::Stream;
 use futures::StreamExt;
@@ -17,6 +18,50 @@ use tokio::time::Instant;
 use tokio::time::timeout;
 use tracing::debug;
 use tracing::trace;
+use tracing::warn;
+
+/// Parse usage information from a Chat Completions API response chunk.
+/// Returns a TokenUsage if the chunk contains usage data.
+fn parse_usage_from_chunk(chunk: &serde_json::Value) -> Option<TokenUsage> {
+    let usage = chunk.get("usage")?;
+
+    let input_tokens = usage
+        .get("prompt_tokens")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+
+    let output_tokens = usage
+        .get("completion_tokens")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+
+    let total_tokens = usage
+        .get("total_tokens")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(input_tokens + output_tokens);
+
+    // Some providers may include prompt_tokens_details with cached_tokens
+    let cached_input_tokens = usage
+        .get("prompt_tokens_details")
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+
+    // Some providers may include completion_tokens_details with reasoning_tokens
+    let reasoning_output_tokens = usage
+        .get("completion_tokens_details")
+        .and_then(|details| details.get("reasoning_tokens"))
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+
+    Some(TokenUsage {
+        input_tokens,
+        cached_input_tokens,
+        output_tokens,
+        reasoning_output_tokens,
+        total_tokens,
+    })
+}
 
 pub(crate) fn spawn_chat_stream(
     stream_response: StreamResponse,
@@ -56,6 +101,15 @@ pub async fn process_chat_sse<S>(
     let mut assistant_item: Option<ResponseItem> = None;
     let mut reasoning_item: Option<ResponseItem> = None;
     let mut completed_sent = false;
+    let mut accumulated_usage: Option<TokenUsage> = None;
+
+    // 🔍 诊断计数器
+    let mut event_count = 0u64;
+    let mut content_delta_count = 0u64;
+    let mut last_event_data: Option<String> = None;
+    let stream_start = Instant::now();
+
+    warn!("📥 [process_chat_sse] 开始处理 SSE 流, idle_timeout={:?}", idle_timeout);
 
     loop {
         let start = Instant::now();
@@ -64,34 +118,53 @@ pub async fn process_chat_sse<S>(
             t.on_sse_poll(&response, start.elapsed());
         }
         let sse = match response {
-            Ok(Some(Ok(sse))) => sse,
+            Ok(Some(Ok(sse))) => {
+                event_count += 1;
+                last_event_data = Some(sse.data.clone());
+                sse
+            }
             Ok(Some(Err(e))) => {
+                warn!(
+                    "❌ [process_chat_sse] SSE 解析错误: {}, 已处理事件数={}, 流运行时间={:?}, 最后事件={:?}",
+                    e, event_count, stream_start.elapsed(), last_event_data
+                );
                 let _ = tx_event.send(Err(ApiError::Stream(e.to_string()))).await;
                 return;
             }
             Ok(None) => {
+                warn!(
+                    "📥 [process_chat_sse] SSE 流结束, completed_sent={}, 事件数={}, content_delta数={}, 流运行时间={:?}, 最后事件={:?}",
+                    completed_sent, event_count, content_delta_count, stream_start.elapsed(), last_event_data
+                );
                 if let Some(reasoning) = reasoning_item {
+                    debug!("📤 [process_chat_sse] 发送 OutputItemDone(Reasoning)");
                     let _ = tx_event
                         .send(Ok(ResponseEvent::OutputItemDone(reasoning)))
                         .await;
                 }
 
                 if let Some(assistant) = assistant_item {
+                    debug!("📤 [process_chat_sse] 发送 OutputItemDone(Message)");
                     let _ = tx_event
                         .send(Ok(ResponseEvent::OutputItemDone(assistant)))
                         .await;
                 }
                 if !completed_sent {
+                    debug!("📤 [process_chat_sse] 发送 Completed 事件");
                     let _ = tx_event
                         .send(Ok(ResponseEvent::Completed {
                             response_id: String::new(),
-                            token_usage: None,
+                            token_usage: accumulated_usage.clone(),
                         }))
                         .await;
                 }
                 return;
             }
             Err(_) => {
+                warn!(
+                    "⏰ [process_chat_sse] SSE 空闲超时, 事件数={}, content_delta数={}, 流运行时间={:?}, 最后事件={:?}",
+                    event_count, content_delta_count, stream_start.elapsed(), last_event_data
+                );
                 let _ = tx_event
                     .send(Err(ApiError::Stream("idle timeout waiting for SSE".into())))
                     .await;
@@ -105,6 +178,34 @@ pub async fn process_chat_sse<S>(
             continue;
         }
 
+        // 处理 OpenAI 标准的 [DONE] 消息，表示流结束
+        if sse.data.trim() == "[DONE]" {
+            warn!("📥 [process_chat_sse] 收到 [DONE] 消息, 事件数={}, 流运行时间={:?}", event_count, stream_start.elapsed());
+            if let Some(reasoning) = reasoning_item.take() {
+                debug!("📤 [process_chat_sse] [DONE] 发送 OutputItemDone(Reasoning)");
+                let _ = tx_event
+                    .send(Ok(ResponseEvent::OutputItemDone(reasoning)))
+                    .await;
+            }
+
+            if let Some(assistant) = assistant_item.take() {
+                debug!("📤 [process_chat_sse] [DONE] 发送 OutputItemDone(Message)");
+                let _ = tx_event
+                    .send(Ok(ResponseEvent::OutputItemDone(assistant)))
+                    .await;
+            }
+            if !completed_sent {
+                debug!("📤 [process_chat_sse] [DONE] 发送 Completed 事件");
+                let _ = tx_event
+                    .send(Ok(ResponseEvent::Completed {
+                        response_id: String::new(),
+                        token_usage: accumulated_usage.clone(),
+                    }))
+                    .await;
+            }
+            return;
+        }
+
         let value: serde_json::Value = match serde_json::from_str(&sse.data) {
             Ok(val) => val,
             Err(err) => {
@@ -116,12 +217,20 @@ pub async fn process_chat_sse<S>(
             }
         };
 
+        // Extract usage information if present (typically in the last chunk)
+        if let Some(usage) = parse_usage_from_chunk(&value) {
+            accumulated_usage = Some(usage);
+        }
+
         let Some(choices) = value.get("choices").and_then(|c| c.as_array()) else {
             continue;
         };
 
         for choice in choices {
             if let Some(delta) = choice.get("delta") {
+                // 处理 reasoning 内容（支持多种格式）
+                // - delta.reasoning: OpenAI 标准格式
+                // - delta.reasoning_content: 智谱 GLM 格式
                 if let Some(reasoning) = delta.get("reasoning") {
                     if let Some(text) = reasoning.as_str() {
                         append_reasoning_text(&tx_event, &mut reasoning_item, text.to_string())
@@ -134,8 +243,17 @@ pub async fn process_chat_sse<S>(
                             .await;
                     }
                 }
+                // 智谱 GLM 使用 reasoning_content 字段
+                // 注意：只接受包含实际内容的文本，过滤掉只有空白字符（如 "\n"）的文本
+                if let Some(text) = delta.get("reasoning_content").and_then(|v| v.as_str())
+                    && !text.trim().is_empty()
+                {
+                    append_reasoning_text(&tx_event, &mut reasoning_item, text.to_string())
+                        .await;
+                }
 
                 if let Some(content) = delta.get("content") {
+                    content_delta_count += 1;
                     if content.is_array() {
                         for item in content.as_array().unwrap_or(&vec![]) {
                             if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
@@ -221,33 +339,40 @@ pub async fn process_chat_sse<S>(
             }
 
             let finish_reason = choice.get("finish_reason").and_then(|r| r.as_str());
-            if finish_reason == Some("stop") {
+            // 处理正常结束的 finish_reason
+            // - "stop": OpenAI 标准
+            // - "normal": 智谱 GLM API
+            // - "end_turn": 某些 API 变体
+            // - "length": 输出被截断（max_tokens 限制），也视为正常完成
+            if matches!(finish_reason, Some("stop") | Some("normal") | Some("end_turn") | Some("length")) {
+                warn!(
+                    "📥 [process_chat_sse] 收到 finish_reason={:?}, 事件数={}, content_delta数={}, 流运行时间={:?}",
+                    finish_reason, event_count, content_delta_count, stream_start.elapsed()
+                );
                 if let Some(reasoning) = reasoning_item.take() {
+                    debug!("📤 [process_chat_sse] finish_reason 发送 OutputItemDone(Reasoning)");
                     let _ = tx_event
                         .send(Ok(ResponseEvent::OutputItemDone(reasoning)))
                         .await;
                 }
 
                 if let Some(assistant) = assistant_item.take() {
+                    debug!("📤 [process_chat_sse] finish_reason 发送 OutputItemDone(Message)");
                     let _ = tx_event
                         .send(Ok(ResponseEvent::OutputItemDone(assistant)))
                         .await;
                 }
                 if !completed_sent {
+                    debug!("📤 [process_chat_sse] finish_reason 发送 Completed 事件");
                     let _ = tx_event
                         .send(Ok(ResponseEvent::Completed {
                             response_id: String::new(),
-                            token_usage: None,
+                            token_usage: accumulated_usage.clone(),
                         }))
                         .await;
                     completed_sent = true;
                 }
                 continue;
-            }
-
-            if finish_reason == Some("length") {
-                let _ = tx_event.send(Err(ApiError::ContextWindowExceeded)).await;
-                return;
             }
 
             if finish_reason == Some("tool_calls") {

@@ -43,6 +43,15 @@ pub struct McpServerConfig {
     /// Explicit deny-list of tools. These tools will be removed after applying `enabled_tools`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled_tools: Option<Vec<String>>,
+
+    /// Maximum number of calls allowed per tool per turn.
+    /// When reached, subsequent calls to the same tool will return an error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_calls_per_tool: Option<u32>,
+
+    /// Maximum total number of calls allowed across all tools from this server per turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_total_calls_per_turn: Option<u32>,
 }
 
 impl<'de> Deserialize<'de> for McpServerConfig {
@@ -84,6 +93,10 @@ impl<'de> Deserialize<'de> for McpServerConfig {
             enabled_tools: Option<Vec<String>>,
             #[serde(default)]
             disabled_tools: Option<Vec<String>>,
+            #[serde(default)]
+            max_calls_per_tool: Option<u32>,
+            #[serde(default)]
+            max_total_calls_per_turn: Option<u32>,
         }
 
         let mut raw = RawMcpServerConfig::deserialize(deserializer)?;
@@ -153,6 +166,8 @@ impl<'de> Deserialize<'de> for McpServerConfig {
             enabled,
             enabled_tools,
             disabled_tools,
+            max_calls_per_tool: raw.max_calls_per_tool,
+            max_total_calls_per_turn: raw.max_total_calls_per_turn,
         })
     }
 }
@@ -800,5 +815,33 @@ mod tests {
             err.to_string().contains("bearer_token is not supported"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn deserialize_mcp_call_limits() {
+        let cfg: McpServerConfig = toml::from_str(
+            r#"
+            command = "echo"
+            max_calls_per_tool = 5
+            max_total_calls_per_turn = 20
+        "#,
+        )
+        .expect("should deserialize call limits");
+
+        assert_eq!(cfg.max_calls_per_tool, Some(5));
+        assert_eq!(cfg.max_total_calls_per_turn, Some(20));
+    }
+
+    #[test]
+    fn deserialize_mcp_call_limits_optional() {
+        let cfg: McpServerConfig = toml::from_str(
+            r#"
+            command = "echo"
+        "#,
+        )
+        .expect("should deserialize without call limits");
+
+        assert_eq!(cfg.max_calls_per_tool, None);
+        assert_eq!(cfg.max_total_calls_per_turn, None);
     }
 }

@@ -10,6 +10,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::SessionSource;
 use http::HeaderMap;
 use serde_json::Value;
+use tracing::debug;
 
 /// Assembled request body plus headers for a Responses stream request.
 pub struct ResponsesRequest {
@@ -136,6 +137,69 @@ impl<'a> ResponsesRequestBuilder<'a> {
         headers.extend(build_conversation_headers(self.conversation_id));
         if let Some(subagent) = subagent_header(&self.session_source) {
             insert_header(&mut headers, "x-openai-subagent", &subagent);
+        }
+
+        // 🔍 DEBUG: 记录完整的请求体
+        debug!(
+            "📤 [ResponsesRequest::build] 构建请求 - model: {}, provider: {}, store: {}",
+            model,
+            provider.name,
+            store
+        );
+        debug!(
+            "📤 [ResponsesRequest::build] 输入项数量: {}, 工具数量: {}, parallel_tool_calls: {}",
+            input.len(),
+            tools.len(),
+            self.parallel_tool_calls
+        );
+
+        // 记录每个输入项的类型和摘要
+        for (i, item) in input.iter().enumerate() {
+            let item_type = match item {
+                ResponseItem::Message { role, .. } => format!("Message(role={role})"),
+                ResponseItem::Reasoning { id, .. } => format!("Reasoning(id={id})"),
+                ResponseItem::FunctionCall { name, call_id, .. } => format!("FunctionCall(name={name}, call_id={call_id})"),
+                ResponseItem::FunctionCallOutput { call_id, .. } => format!("FunctionCallOutput(call_id={call_id})"),
+                ResponseItem::LocalShellCall { call_id, action, .. } => {
+                    let cmd_preview = match action {
+                        codex_protocol::models::LocalShellAction::Exec(exec) => {
+                            let cmd = exec.command.join(" ");
+                            if cmd.len() > 50 {
+                                format!("{}...", &cmd[..50])
+                            } else {
+                                cmd
+                            }
+                        }
+                    };
+                    format!("LocalShellCall(call_id={call_id:?}, cmd={cmd_preview})")
+                }
+                ResponseItem::WebSearchCall { id, status, .. } => format!("WebSearchCall(id={id:?}, status={status:?})"),
+                ResponseItem::CustomToolCall { name, call_id, .. } => format!("CustomToolCall(name={name}, call_id={call_id})"),
+                ResponseItem::CustomToolCallOutput { call_id, .. } => format!("CustomToolCallOutput(call_id={call_id})"),
+                ResponseItem::GhostSnapshot { .. } => "GhostSnapshot".to_string(),
+                ResponseItem::CompactionSummary { .. } => "CompactionSummary".to_string(),
+                ResponseItem::Other => "Other".to_string(),
+            };
+            debug!("📤 [ResponsesRequest::build] input[{}]: {}", i, item_type);
+        }
+
+        // 记录工具列表
+        for (i, tool) in tools.iter().enumerate() {
+            if let Some(name) = tool.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()) {
+                debug!("📤 [ResponsesRequest::build] tool[{}]: {}", i, name);
+            } else if let Some(tool_type) = tool.get("type").and_then(|t| t.as_str()) {
+                debug!("📤 [ResponsesRequest::build] tool[{}]: type={}", i, tool_type);
+            }
+        }
+
+        // 记录完整请求体（格式化JSON，但限制长度）
+        if let Ok(formatted) = serde_json::to_string_pretty(&body) {
+            let preview = if formatted.len() > 5000 {
+                format!("{}...(truncated, total {} bytes)", &formatted[..5000], formatted.len())
+            } else {
+                formatted
+            };
+            debug!("📤 [ResponsesRequest::build] 完整请求体:\n{}", preview);
         }
 
         Ok(ResponsesRequest { body, headers })

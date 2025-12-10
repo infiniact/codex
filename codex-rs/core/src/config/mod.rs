@@ -1965,6 +1965,8 @@ trust_level = "trusted"
                 tool_timeout_sec: Some(Duration::from_secs(5)),
                 enabled_tools: None,
                 disabled_tools: None,
+                max_calls_per_tool: None,
+                max_total_calls_per_turn: None,
             },
         );
 
@@ -2111,6 +2113,8 @@ bearer_token = "secret"
                 tool_timeout_sec: None,
                 enabled_tools: None,
                 disabled_tools: None,
+                max_calls_per_tool: None,
+                max_total_calls_per_turn: None,
             },
         )]);
 
@@ -2179,6 +2183,8 @@ ZIG_VAR = "3"
                 tool_timeout_sec: None,
                 enabled_tools: None,
                 disabled_tools: None,
+                max_calls_per_tool: None,
+                max_total_calls_per_turn: None,
             },
         )]);
 
@@ -2227,6 +2233,8 @@ ZIG_VAR = "3"
                 tool_timeout_sec: None,
                 enabled_tools: None,
                 disabled_tools: None,
+                max_calls_per_tool: None,
+                max_total_calls_per_turn: None,
             },
         )]);
 
@@ -2273,6 +2281,8 @@ ZIG_VAR = "3"
                 tool_timeout_sec: None,
                 enabled_tools: None,
                 disabled_tools: None,
+                max_calls_per_tool: None,
+                max_total_calls_per_turn: None,
             },
         )]);
 
@@ -2335,6 +2345,8 @@ startup_timeout_sec = 2.0
                 tool_timeout_sec: None,
                 enabled_tools: None,
                 disabled_tools: None,
+                max_calls_per_tool: None,
+                max_total_calls_per_turn: None,
             },
         )]);
         apply_blocking(
@@ -2409,6 +2421,8 @@ X-Auth = "DOCS_AUTH"
                 tool_timeout_sec: None,
                 enabled_tools: None,
                 disabled_tools: None,
+                max_calls_per_tool: None,
+                max_total_calls_per_turn: None,
             },
         )]);
 
@@ -2436,6 +2450,8 @@ X-Auth = "DOCS_AUTH"
                 tool_timeout_sec: None,
                 enabled_tools: None,
                 disabled_tools: None,
+                max_calls_per_tool: None,
+                max_total_calls_per_turn: None,
             },
         );
         apply_blocking(
@@ -2501,6 +2517,8 @@ url = "https://example.com/mcp"
                     tool_timeout_sec: None,
                     enabled_tools: None,
                     disabled_tools: None,
+                max_calls_per_tool: None,
+                max_total_calls_per_turn: None,
                 },
             ),
             (
@@ -2518,6 +2536,8 @@ url = "https://example.com/mcp"
                     tool_timeout_sec: None,
                     enabled_tools: None,
                     disabled_tools: None,
+                max_calls_per_tool: None,
+                max_total_calls_per_turn: None,
                 },
             ),
         ]);
@@ -2598,6 +2618,8 @@ url = "https://example.com/mcp"
                 tool_timeout_sec: None,
                 enabled_tools: None,
                 disabled_tools: None,
+                max_calls_per_tool: None,
+                max_total_calls_per_turn: None,
             },
         )]);
 
@@ -2640,6 +2662,8 @@ url = "https://example.com/mcp"
                 tool_timeout_sec: None,
                 enabled_tools: Some(vec!["allowed".to_string()]),
                 disabled_tools: Some(vec!["blocked".to_string()]),
+                max_calls_per_tool: None,
+                max_total_calls_per_turn: None,
             },
         )]);
 

@@ -271,7 +271,9 @@ async fn handle_list_resources(
                 .list_resources(&server_name, params)
                 .await
                 .map_err(|err| {
-                    FunctionCallError::RespondToModel(format!("resources/list failed: {err:#}"))
+                    FunctionCallError::RespondToModel(format!(
+                        "resources/list failed: {err:#}. You can continue with other tools or shell commands."
+                    ))
                 })?;
             Ok(ListResourcesPayload::from_single_server(
                 server_name,
@@ -381,7 +383,7 @@ async fn handle_list_resource_templates(
                 .await
                 .map_err(|err| {
                     FunctionCallError::RespondToModel(format!(
-                        "resources/templates/list failed: {err:#}"
+                        "resources/templates/list failed: {err:#}. You can continue with other tools or shell commands."
                     ))
                 })?;
             Ok(ListResourceTemplatesPayload::from_single_server(
@@ -485,7 +487,9 @@ async fn handle_read_resource(
             .read_resource(&server, ReadResourceRequestParams { uri: uri.clone() })
             .await
             .map_err(|err| {
-                FunctionCallError::RespondToModel(format!("resources/read failed: {err:#}"))
+                FunctionCallError::RespondToModel(format!(
+                    "resources/read failed: {err:#}. Consider using shell commands as an alternative approach to access the data you need."
+                ))
             })?;
 
         Ok(ReadResourcePayload {

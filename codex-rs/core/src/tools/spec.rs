@@ -666,15 +666,21 @@ fn create_list_dir_tool() -> ToolSpec {
     })
 }
 
-fn create_list_mcp_resources_tool() -> ToolSpec {
+fn create_list_mcp_resources_tool(available_servers: &[String]) -> ToolSpec {
+    let servers_description = if available_servers.is_empty() {
+        "Optional MCP server name. When omitted, lists resources from every configured server. Note: No MCP servers are currently configured.".to_string()
+    } else {
+        format!(
+            "Optional MCP server name. When omitted, lists resources from every configured server. Available servers: [{}]",
+            available_servers.join(", ")
+        )
+    };
+
     let mut properties = BTreeMap::new();
     properties.insert(
         "server".to_string(),
         JsonSchema::String {
-            description: Some(
-                "Optional MCP server name. When omitted, lists resources from every configured server."
-                    .to_string(),
-            ),
+            description: Some(servers_description),
         },
     );
     properties.insert(
@@ -699,15 +705,21 @@ fn create_list_mcp_resources_tool() -> ToolSpec {
     })
 }
 
-fn create_list_mcp_resource_templates_tool() -> ToolSpec {
+fn create_list_mcp_resource_templates_tool(available_servers: &[String]) -> ToolSpec {
+    let servers_description = if available_servers.is_empty() {
+        "Optional MCP server name. When omitted, lists resource templates from all configured servers. Note: No MCP servers are currently configured.".to_string()
+    } else {
+        format!(
+            "Optional MCP server name. When omitted, lists resource templates from all configured servers. Available servers: [{}]",
+            available_servers.join(", ")
+        )
+    };
+
     let mut properties = BTreeMap::new();
     properties.insert(
         "server".to_string(),
         JsonSchema::String {
-            description: Some(
-                "Optional MCP server name. When omitted, lists resource templates from all configured servers."
-                    .to_string(),
-            ),
+            description: Some(servers_description),
         },
     );
     properties.insert(
@@ -732,15 +744,21 @@ fn create_list_mcp_resource_templates_tool() -> ToolSpec {
     })
 }
 
-fn create_read_mcp_resource_tool() -> ToolSpec {
+fn create_read_mcp_resource_tool(available_servers: &[String]) -> ToolSpec {
+    let servers_description = if available_servers.is_empty() {
+        "MCP server name exactly as configured. Must match the 'server' field returned by list_mcp_resources. Note: No MCP servers are currently configured.".to_string()
+    } else {
+        format!(
+            "MCP server name exactly as configured. Must match the 'server' field returned by list_mcp_resources. Available servers: [{}]",
+            available_servers.join(", ")
+        )
+    };
+
     let mut properties = BTreeMap::new();
     properties.insert(
         "server".to_string(),
         JsonSchema::String {
-            description: Some(
-                "MCP server name exactly as configured. Must match the 'server' field returned by list_mcp_resources."
-                    .to_string(),
-            ),
+            description: Some(servers_description),
         },
     );
     properties.insert(
@@ -1023,9 +1041,26 @@ pub(crate) fn build_specs(
         builder.register_handler("shell_command", shell_command_handler);
     }
 
-    builder.push_spec_with_parallel_support(create_list_mcp_resources_tool(), true);
-    builder.push_spec_with_parallel_support(create_list_mcp_resource_templates_tool(), true);
-    builder.push_spec_with_parallel_support(create_read_mcp_resource_tool(), true);
+    // Extract unique MCP server names from mcp_tools
+    // Tool names are in format: mcp__<server_name>__<tool_name>
+    let available_servers: Vec<String> = mcp_tools
+        .as_ref()
+        .map(|tools| {
+            let mut servers: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for tool_name in tools.keys() {
+                if let Some((server_name, _)) = crate::mcp::split_qualified_tool_name(tool_name) {
+                    servers.insert(server_name);
+                }
+            }
+            let mut sorted: Vec<String> = servers.into_iter().collect();
+            sorted.sort();
+            sorted
+        })
+        .unwrap_or_default();
+
+    builder.push_spec_with_parallel_support(create_list_mcp_resources_tool(&available_servers), true);
+    builder.push_spec_with_parallel_support(create_list_mcp_resource_templates_tool(&available_servers), true);
+    builder.push_spec_with_parallel_support(create_read_mcp_resource_tool(&available_servers), true);
     builder.register_handler("list_mcp_resources", mcp_resource_handler.clone());
     builder.register_handler("list_mcp_resource_templates", mcp_resource_handler.clone());
     builder.register_handler("read_mcp_resource", mcp_resource_handler);
@@ -1238,12 +1273,13 @@ mod tests {
 
         // Build expected from the same helpers used by the builder.
         let mut expected: BTreeMap<String, ToolSpec> = BTreeMap::new();
+        let empty_servers: Vec<String> = vec![];
         for spec in [
             create_exec_command_tool(),
             create_write_stdin_tool(),
-            create_list_mcp_resources_tool(),
-            create_list_mcp_resource_templates_tool(),
-            create_read_mcp_resource_tool(),
+            create_list_mcp_resources_tool(&empty_servers),
+            create_list_mcp_resource_templates_tool(&empty_servers),
+            create_read_mcp_resource_tool(&empty_servers),
             PLAN_TOOL.clone(),
             create_apply_patch_freeform_tool(),
             ToolSpec::WebSearch {},

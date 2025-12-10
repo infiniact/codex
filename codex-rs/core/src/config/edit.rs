@@ -899,6 +899,8 @@ existing = "value"
                 tool_timeout_sec: None,
                 enabled_tools: Some(vec!["one".to_string(), "two".to_string()]),
                 disabled_tools: None,
+                max_calls_per_tool: None,
+                max_total_calls_per_turn: None,
             },
         );
 
@@ -920,6 +922,8 @@ existing = "value"
                 tool_timeout_sec: None,
                 enabled_tools: None,
                 disabled_tools: Some(vec!["forbidden".to_string()]),
+                max_calls_per_tool: None,
+                max_total_calls_per_turn: None,
             },
         );
 

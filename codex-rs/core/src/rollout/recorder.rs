@@ -313,8 +313,8 @@ fn create_log_file(
     conversation_id: ConversationId,
 ) -> std::io::Result<LogFileInfo> {
     // Resolve ~/.codex/sessions/YYYY/MM/DD and create it if missing.
-    let timestamp = OffsetDateTime::now_local()
-        .map_err(|e| IoError::other(format!("failed to get local time: {e}")))?;
+    // 统一使用 UTC 时间，与 rollout 内容中的时间戳保持一致
+    let timestamp = OffsetDateTime::now_utc();
     let mut dir = config.codex_home.clone();
     dir.push(SESSIONS_SUBDIR);
     dir.push(timestamp.year().to_string());

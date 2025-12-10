@@ -36,6 +36,7 @@ use crate::truncate::formatted_truncate_text;
 
 use super::ExecCommandRequest;
 use super::MAX_UNIFIED_EXEC_SESSIONS;
+use super::PtyServiceBridge;
 use super::SessionEntry;
 use super::SessionStore;
 use super::UnifiedExecContext;
@@ -45,7 +46,9 @@ use super::UnifiedExecSessionManager;
 use super::WARNING_UNIFIED_EXEC_SESSIONS;
 use super::WriteStdinRequest;
 use super::clamp_yield_time;
+use super::format_command_for_execution;
 use super::generate_chunk_id;
+use super::get_global_conversation_connection;
 use super::resolve_max_tokens;
 use super::session::OutputBuffer;
 use super::session::OutputHandles;
@@ -126,6 +129,20 @@ impl UnifiedExecSessionManager {
             .clone()
             .unwrap_or_else(|| context.turn.cwd.clone());
 
+        // Check if PTY bridge is available - if so, use it instead of the native PTY
+        if let Some(ref pty_bridge) = context.session.services.pty_bridge
+            && pty_bridge.is_available()
+        {
+            tracing::info!(
+                "[UnifiedExec] Using PTY bridge for command execution: {:?}",
+                request.command
+            );
+            return self
+                .exec_command_via_bridge(pty_bridge.clone(), request, context, cwd)
+                .await;
+        }
+
+        // Fall back to native PTY execution
         let session = self
             .open_session_with_sandbox(
                 &request.command,
@@ -213,6 +230,81 @@ impl UnifiedExecSessionManager {
                 Some(request.process_id.clone())
             },
             exit_code,
+            original_token_count: Some(original_token_count),
+            session_command: Some(request.command.clone()),
+        };
+
+        Ok(response)
+    }
+
+    /// Execute command via external PTY bridge (for integrations like iaterm)
+    async fn exec_command_via_bridge(
+        &self,
+        bridge: Arc<dyn PtyServiceBridge>,
+        request: ExecCommandRequest,
+        context: &UnifiedExecContext,
+        cwd: PathBuf,
+    ) -> Result<UnifiedExecResponse, UnifiedExecError> {
+        let start = Instant::now();
+        let max_tokens = resolve_max_tokens(request.max_output_tokens);
+        let chunk_id = generate_chunk_id();
+
+        // Get the connection ID for this conversation
+        let conversation_id = context.session.get_conversation_id().to_string();
+        let connection_id = get_global_conversation_connection(&conversation_id).await;
+
+        tracing::debug!(
+            "[UnifiedExec Bridge] conversation_id={}, connection_id={:?}, command={:?}",
+            conversation_id,
+            connection_id,
+            request.command
+        );
+
+        // Prepare command string - 使用智能格式化处理 bash -c 等命令
+        let command_str = format_command_for_execution(&request.command);
+        let shell = context.session.services.user_shell.shell_path.to_string_lossy().to_string();
+
+        // Execute via bridge
+        let result = bridge
+            .execute(
+                &command_str,
+                &shell,
+                false, // login
+                true,  // display_in_panel
+                connection_id.as_deref(),
+                None,  // stdin
+            )
+            .await
+            .map_err(|e| UnifiedExecError::create_session(format!("PTY bridge error: {e}")))?;
+
+        let wall_time = Instant::now().saturating_duration_since(start);
+
+        // Truncate output if needed
+        let output = formatted_truncate_text(&result.output, TruncationPolicy::Tokens(max_tokens));
+        let original_token_count = approx_token_count(&result.output);
+
+        // Release the process ID since bridge commands don't persist sessions
+        self.release_process_id(&request.process_id).await;
+
+        // Emit end event
+        Self::emit_exec_end_from_context(
+            context,
+            &request.command,
+            cwd,
+            output.clone(),
+            result.exit_code.unwrap_or(0),
+            wall_time,
+            Some(request.process_id.clone()),
+        )
+        .await;
+
+        let response = UnifiedExecResponse {
+            event_call_id: context.call_id.clone(),
+            chunk_id,
+            wall_time,
+            output,
+            process_id: None, // Bridge commands don't have persistent sessions
+            exit_code: result.exit_code,
             original_token_count: Some(original_token_count),
             session_command: Some(request.command.clone()),
         };
@@ -529,7 +621,7 @@ impl UnifiedExecSessionManager {
         let command_display = if let Some((_, script)) = extract_bash_command(command) {
             script.to_string()
         } else {
-            command.join(" ")
+            format_command_for_execution(command)
         };
         let message = format!("Waiting for `{command_display}`");
         session

@@ -27,6 +27,7 @@ use codex_protocol::protocol::RolloutItem;
 use codex_protocol::user_input::UserInput;
 use futures::prelude::*;
 use tracing::error;
+use tracing::info;
 
 pub const SUMMARIZATION_PROMPT: &str = include_str!("../templates/compact/prompt.md");
 pub const SUMMARY_PREFIX: &str = include_str!("../templates/compact/summary_prefix.md");
@@ -76,7 +77,35 @@ async fn run_compact_task_inner(
         turn_context.truncation_policy,
     );
 
-    let mut truncated_count = 0usize;
+    // 预先截取历史：在发送 compact 请求前，确保历史大小符合上下文窗口限制
+    // 使用上下文窗口的 80% 作为目标，留出空间给模型输出
+    let context_window = turn_context
+        .client
+        .get_model_context_window()
+        .unwrap_or(128_000); // 默认 128k
+    let target_tokens = (context_window * 80) / 100;
+
+    // 在截取前记录历史大小
+    let items_before = history.items_count();
+    let tokens_before = history.estimate_total_tokens();
+    info!(
+        "📊 [Compact] 开始预截取: 历史项目数={}, 估算tokens={}, 目标tokens={}",
+        items_before, tokens_before, target_tokens
+    );
+
+    let pre_truncated_count = history.truncate_to_token_limit(target_tokens);
+
+    // 截取后记录
+    let items_after = history.items_count();
+    let tokens_after = history.estimate_total_tokens();
+    if pre_truncated_count > 0 {
+        info!(
+            "📊 [Compact] 预截取完成: 删除{}项, 剩余{}项, tokens: {} -> {}",
+            pre_truncated_count, items_after, tokens_before, tokens_after
+        );
+    }
+
+    let mut truncated_count = pre_truncated_count;
 
     let max_retries = turn_context.client.get_provider().stream_max_retries();
     let mut retries = 0;
@@ -93,9 +122,24 @@ async fn run_compact_task_inner(
 
     loop {
         let turn_input = history.get_history_for_prompt();
+
+        // 获取模型的 base_instructions
+        let base_instructions = turn_context
+            .base_instructions
+            .as_ref()
+            .cloned()
+            .or_else(|| Some(turn_context.client.get_model_family().base_instructions));
+
         let prompt = Prompt {
             input: turn_input.clone(),
-            ..Default::default()
+            tools: Vec::new(), // compact 不需要 tools
+            parallel_tool_calls: false,
+            base_instructions_override: base_instructions,
+            output_schema: None,
+            temperature: None,
+            top_k: None,
+            top_p: None,
+            repetition_penalty: None,
         };
         let attempt_result = drain_to_completed(&sess, turn_context.as_ref(), &prompt).await;
 

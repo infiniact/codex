@@ -180,6 +180,10 @@ struct ManagedClient {
     tool_filter: ToolFilter,
     tool_timeout: Option<Duration>,
     server_supports_sandbox_state_capability: bool,
+    /// Maximum calls allowed per tool per turn (None = unlimited).
+    max_calls_per_tool: Option<u32>,
+    /// Maximum total calls allowed across all tools per turn (None = unlimited).
+    max_total_calls_per_turn: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -197,6 +201,8 @@ impl AsyncManagedClient {
         elicitation_requests: ElicitationRequestManager,
     ) -> Self {
         let tool_filter = ToolFilter::from_config(&config);
+        let max_calls_per_tool = config.max_calls_per_tool;
+        let max_total_calls_per_turn = config.max_total_calls_per_turn;
         let fut = async move {
             if let Err(error) = validate_mcp_server_name(&server_name) {
                 return Err(error.into());
@@ -210,6 +216,8 @@ impl AsyncManagedClient {
                 config.startup_timeout_sec.or(Some(DEFAULT_STARTUP_TIMEOUT)),
                 config.tool_timeout_sec.unwrap_or(DEFAULT_TOOL_TIMEOUT),
                 tool_filter,
+                max_calls_per_tool,
+                max_total_calls_per_turn,
                 tx_event,
                 elicitation_requests,
             )
@@ -259,11 +267,52 @@ pub struct SandboxState {
     pub sandbox_cwd: PathBuf,
 }
 
+/// Tracks MCP tool call counts per turn for rate limiting.
+#[derive(Default, Clone)]
+pub(crate) struct McpCallTracker {
+    /// Key: (server_name, tool_name), Value: call count
+    per_tool_counts: HashMap<(String, String), u32>,
+    /// Key: server_name, Value: total call count for that server
+    per_server_total_counts: HashMap<String, u32>,
+}
+
+impl McpCallTracker {
+    /// Resets all call counts (should be called at the start of each turn).
+    pub fn reset(&mut self) {
+        self.per_tool_counts.clear();
+        self.per_server_total_counts.clear();
+    }
+
+    /// Records a tool call and returns the new counts.
+    pub fn record_call(&mut self, server: &str, tool: &str) -> (u32, u32) {
+        let tool_key = (server.to_string(), tool.to_string());
+        let tool_count = self.per_tool_counts.entry(tool_key).or_insert(0);
+        *tool_count += 1;
+        let current_tool_count = *tool_count;
+
+        let server_count = self.per_server_total_counts.entry(server.to_string()).or_insert(0);
+        *server_count += 1;
+        let current_server_count = *server_count;
+
+        (current_tool_count, current_server_count)
+    }
+
+    /// Gets current call counts without incrementing.
+    pub fn get_counts(&self, server: &str, tool: &str) -> (u32, u32) {
+        let tool_key = (server.to_string(), tool.to_string());
+        let tool_count = self.per_tool_counts.get(&tool_key).copied().unwrap_or(0);
+        let server_count = self.per_server_total_counts.get(server).copied().unwrap_or(0);
+        (tool_count, server_count)
+    }
+}
+
 /// A thin wrapper around a set of running [`RmcpClient`] instances.
 #[derive(Default)]
 pub(crate) struct McpConnectionManager {
     clients: HashMap<String, AsyncManagedClient>,
     elicitation_requests: ElicitationRequestManager,
+    /// Tracks tool call counts for rate limiting.
+    call_tracker: McpCallTracker,
 }
 
 impl McpConnectionManager {
@@ -357,10 +406,29 @@ impl McpConnectionManager {
         });
     }
 
+    /// Resets the call tracker at the start of each turn.
+    pub fn reset_call_tracker(&mut self) {
+        self.call_tracker.reset();
+    }
+
     async fn client_by_name(&self, name: &str) -> Result<ManagedClient> {
         self.clients
             .get(name)
-            .ok_or_else(|| anyhow!("unknown MCP server '{name}'"))?
+            .ok_or_else(|| {
+                let available_servers: Vec<&String> = self.clients.keys().collect();
+                if available_servers.is_empty() {
+                    anyhow!("unknown MCP server '{name}'. No MCP servers are currently configured.")
+                } else {
+                    anyhow!(
+                        "unknown MCP server '{name}'. Available servers: [{}]",
+                        available_servers
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            })?
             .client()
             .await
             .context("failed to get client")
@@ -528,9 +596,10 @@ impl McpConnectionManager {
         aggregated
     }
 
-    /// Invoke the tool indicated by the (server, tool) pair.
-    pub async fn call_tool(
-        &self,
+    /// Invoke the tool indicated by the (server, tool) pair with rate limit checking.
+    /// This method checks and enforces the per-tool and per-server-total call limits.
+    pub async fn call_tool_with_limit_check(
+        &mut self,
         server: &str,
         tool: &str,
         arguments: Option<serde_json::Value>,
@@ -541,6 +610,30 @@ impl McpConnectionManager {
                 "tool '{tool}' is disabled for MCP server '{server}'"
             ));
         }
+
+        // Check call limits before recording the call
+        let (current_tool_count, current_server_count) = self.call_tracker.get_counts(server, tool);
+
+        // Check per-tool limit
+        if let Some(max_per_tool) = client.max_calls_per_tool
+            && current_tool_count >= max_per_tool
+        {
+            return Err(anyhow!(
+                "MCP tool call limit reached: tool '{tool}' on server '{server}' has been called {current_tool_count} times (max: {max_per_tool})"
+            ));
+        }
+
+        // Check per-server-total limit
+        if let Some(max_total) = client.max_total_calls_per_turn
+            && current_server_count >= max_total
+        {
+            return Err(anyhow!(
+                "MCP server call limit reached: server '{server}' has received {current_server_count} total calls this turn (max: {max_total})"
+            ));
+        }
+
+        // Record this call
+        self.call_tracker.record_call(server, tool);
 
         client
             .client
@@ -733,12 +826,15 @@ impl From<anyhow::Error> for StartupOutcomeError {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_server_task(
     server_name: String,
     client: Arc<RmcpClient>,
     startup_timeout: Option<Duration>, // TODO: cancel_token should handle this.
     tool_timeout: Duration,
     tool_filter: ToolFilter,
+    max_calls_per_tool: Option<u32>,
+    max_total_calls_per_turn: Option<u32>,
     tx_event: Sender<Event>,
     elicitation_requests: ElicitationRequestManager,
 ) -> Result<ManagedClient, StartupOutcomeError> {
@@ -787,6 +883,8 @@ async fn start_server_task(
         tool_timeout: Some(tool_timeout),
         tool_filter,
         server_supports_sandbox_state_capability,
+        max_calls_per_tool,
+        max_total_calls_per_turn,
     };
 
     Ok(managed)
@@ -1095,6 +1193,8 @@ mod tests {
                 tool_timeout_sec: None,
                 enabled_tools: None,
                 disabled_tools: None,
+                max_calls_per_tool: None,
+                max_total_calls_per_turn: None,
             },
             auth_status: McpAuthStatus::Unsupported,
         };
@@ -1139,6 +1239,8 @@ mod tests {
                 tool_timeout_sec: None,
                 enabled_tools: None,
                 disabled_tools: None,
+                max_calls_per_tool: None,
+                max_total_calls_per_turn: None,
             },
             auth_status: McpAuthStatus::Unsupported,
         };
@@ -1162,5 +1264,68 @@ mod tests {
             "MCP client for `slow` timed out after 10 seconds. Add or adjust `startup_timeout_sec` in your config.toml:\n[mcp_servers.slow]\nstartup_timeout_sec = XX",
             display
         );
+    }
+
+    // Tests for McpCallTracker
+    #[test]
+    fn call_tracker_starts_empty() {
+        let tracker = McpCallTracker::default();
+        let (tool_count, server_count) = tracker.get_counts("server1", "tool1");
+        assert_eq!(tool_count, 0);
+        assert_eq!(server_count, 0);
+    }
+
+    #[test]
+    fn call_tracker_records_calls() {
+        let mut tracker = McpCallTracker::default();
+
+        // First call
+        let (tool_count, server_count) = tracker.record_call("server1", "tool1");
+        assert_eq!(tool_count, 1);
+        assert_eq!(server_count, 1);
+
+        // Second call to same tool
+        let (tool_count, server_count) = tracker.record_call("server1", "tool1");
+        assert_eq!(tool_count, 2);
+        assert_eq!(server_count, 2);
+
+        // Call to different tool on same server
+        let (tool_count, server_count) = tracker.record_call("server1", "tool2");
+        assert_eq!(tool_count, 1);
+        assert_eq!(server_count, 3);
+    }
+
+    #[test]
+    fn call_tracker_tracks_different_servers() {
+        let mut tracker = McpCallTracker::default();
+
+        // Calls to server1
+        tracker.record_call("server1", "tool1");
+        tracker.record_call("server1", "tool1");
+
+        // Calls to server2
+        let (tool_count, server_count) = tracker.record_call("server2", "tool1");
+        assert_eq!(tool_count, 1);  // Different server, so starts at 1
+        assert_eq!(server_count, 1);  // Different server, so starts at 1
+
+        // Verify server1 counts are independent
+        let (tool_count, server_count) = tracker.get_counts("server1", "tool1");
+        assert_eq!(tool_count, 2);
+        assert_eq!(server_count, 2);
+    }
+
+    #[test]
+    fn call_tracker_resets_properly() {
+        let mut tracker = McpCallTracker::default();
+
+        tracker.record_call("server1", "tool1");
+        tracker.record_call("server1", "tool2");
+        tracker.record_call("server2", "tool1");
+
+        tracker.reset();
+
+        let (tool_count, server_count) = tracker.get_counts("server1", "tool1");
+        assert_eq!(tool_count, 0);
+        assert_eq!(server_count, 0);
     }
 }

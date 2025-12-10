@@ -36,4 +36,26 @@ impl CodexConversation {
     pub fn rollout_path(&self) -> PathBuf {
         self.rollout_path.clone()
     }
+
+    /// 检查会话是否仍然活跃（agent loop 是否仍在运行）
+    ///
+    /// 返回 `true` 表示会话仍然活跃，可以继续发送消息
+    /// 返回 `false` 表示会话已关闭，需要重新创建会话
+    ///
+    /// # 使用场景
+    ///
+    /// 在调用 `submit()` 之前检查会话状态：
+    /// ```rust,no_run
+    /// if !conversation.is_alive() {
+    ///     // 会话已关闭，需要重新创建会话或从 rollout 恢复
+    /// }
+    /// ```
+    pub fn is_alive(&self) -> bool {
+        self.codex.is_alive()
+    }
+
+    /// 检查是否有待处理的事件
+    pub fn has_pending_events(&self) -> bool {
+        self.codex.has_pending_events()
+    }
 }

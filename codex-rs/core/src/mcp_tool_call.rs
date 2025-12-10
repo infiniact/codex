@@ -13,6 +13,7 @@ use codex_protocol::models::ResponseInputItem;
 
 /// Handles the specified tool call dispatches the appropriate
 /// `McpToolCallBegin` and `McpToolCallEnd` events to the `Session`.
+/// This function also enforces MCP tool call rate limits.
 pub(crate) async fn handle_mcp_tool_call(
     sess: &Session,
     turn_context: &TurnContext,
@@ -55,9 +56,9 @@ pub(crate) async fn handle_mcp_tool_call(
     notify_mcp_tool_call_event(sess, turn_context, tool_call_begin_event).await;
 
     let start = Instant::now();
-    // Perform the tool call.
+    // Perform the tool call with rate limit checking.
     let result = sess
-        .call_tool(&server, &tool_name, arguments_value.clone())
+        .call_tool_with_limit_check(&server, &tool_name, arguments_value.clone())
         .await
         .map_err(|e| format!("tool call error: {e:?}"));
     if let Err(e) = &result {

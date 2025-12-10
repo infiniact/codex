@@ -78,6 +78,22 @@ pub(crate) fn get_model_info(model_family: &ModelFamily) -> Option<ModelInfo> {
 
         _ if slug.starts_with("exp-") => Some(ModelInfo::new(CONTEXT_WINDOW_272K)),
 
+        // Anthropic Claude models
+        // https://docs.anthropic.com/en/docs/about-claude/models
+        _ if slug.contains("claude-3-opus") => Some(ModelInfo::new(200_000)),
+        _ if slug.contains("claude-3-sonnet") || slug.contains("claude-3.5-sonnet") => Some(ModelInfo::new(200_000)),
+        _ if slug.contains("claude-3-haiku") || slug.contains("claude-3.5-haiku") => Some(ModelInfo::new(200_000)),
+        _ if slug.contains("claude") => Some(ModelInfo::new(200_000)),  // 其他 Claude 模型默认 200k
+
+        // 智谱 GLM 模型
+        // https://bigmodel.cn/dev/howuse/model
+        // GLM-4 系列：128K 上下文窗口
+        _ if slug.starts_with("glm-4") || slug.starts_with("GLM-4") => Some(ModelInfo::new(128_000)),
+        // GLM-3 系列：8K 上下文窗口
+        _ if slug.starts_with("glm-3") || slug.starts_with("GLM-3") => Some(ModelInfo::new(8_000)),
+        // 其他智谱模型默认 128K
+        _ if slug.contains("glm") || slug.contains("GLM") => Some(ModelInfo::new(128_000)),
+
         _ => None,
     }
 }

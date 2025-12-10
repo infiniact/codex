@@ -54,6 +54,34 @@ impl<T: HttpTransport, A: AuthProvider> StreamingClient<T, A> {
         extra_headers: HeaderMap,
         spawner: fn(StreamResponse, Duration, Option<Arc<dyn SseTelemetry>>) -> ResponseStream,
     ) -> Result<ResponseStream, ApiError> {
+        // 🔍 DEBUG: 打印请求体，用于调试 GLM API 1213 错误
+        // 检查 messages 是否存在和 user 消息
+        let messages = body.get("messages");
+        let has_user_msg = messages
+            .and_then(|m| m.as_array())
+            .map(|arr| arr.iter().any(|m| m.get("role").and_then(|r| r.as_str()) == Some("user")))
+            .unwrap_or(false);
+        let msg_count = messages
+            .and_then(|m| m.as_array())
+            .map(std::vec::Vec::len)
+            .unwrap_or(0);
+
+        tracing::warn!(
+            "📤 [StreamingClient::stream] 请求概览: model={}, messages_count={}, has_user_msg={}, has_tools={}",
+            body.get("model").and_then(|m| m.as_str()).unwrap_or("?"),
+            msg_count,
+            has_user_msg,
+            body.get("tools").is_some()
+        );
+
+        // 如果没有 user 消息，打印完整请求体
+        if !has_user_msg {
+            tracing::warn!(
+                "⚠️ [StreamingClient::stream] 警告：没有 user 消息！完整请求体: {}",
+                serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string())
+            );
+        }
+
         let builder = || {
             let mut req = self.provider.build_request(Method::POST, path);
             req.headers.extend(extra_headers.clone());

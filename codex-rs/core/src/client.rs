@@ -122,10 +122,45 @@ impl ModelClient {
     /// For Chat providers, the underlying stream is optionally aggregated
     /// based on the `show_raw_agent_reasoning` flag in the config.
     pub async fn stream(&self, prompt: &Prompt) -> Result<ResponseStream> {
+        tracing::warn!("🔄 [ModelClient::stream] ========== 进入 stream 函数 ==========");
+        tracing::warn!(
+            "   model: {}, provider: {:?}, wire_api: {:?}",
+            self.config.model,
+            self.provider.name,
+            self.provider.wire_api
+        );
+        tracing::warn!(
+            "   input_items: {}, tools: {}",
+            prompt.input.len(),
+            prompt.tools.len()
+        );
+
+        // 🔍 DEBUG: 记录模型调用的输入信息
+        tracing::debug!(
+            "🚀 [ModelClient::stream] 开始模型调用 - model: {}, provider: {:?}, wire_api: {:?}",
+            self.config.model,
+            self.provider.name,
+            self.provider.wire_api
+        );
+        tracing::debug!(
+            "📥 [ModelClient::stream] 输入信息 - input_items: {}, tools: {}, parallel_tool_calls: {}",
+            prompt.input.len(),
+            prompt.tools.len(),
+            prompt.parallel_tool_calls
+        );
+
+        // 跳过详细的 debug 日志循环，直接到 wire_api 处理
+        tracing::warn!("   ⏭️ 跳过详细日志，直接处理 wire_api...");
+
         match self.provider.wire_api {
-            WireApi::Responses => self.stream_responses_api(prompt).await,
+            WireApi::Responses => {
+                tracing::warn!("🔗 [stream] 使用 Responses API");
+                self.stream_responses_api(prompt).await
+            }
             WireApi::Chat => {
+                tracing::warn!("🔗 [stream] 使用 Chat Completions API");
                 let api_stream = self.stream_chat_completions(prompt).await?;
+                tracing::warn!("✅ [stream] Chat Completions API 返回成功");
 
                 if self.config.show_raw_agent_reasoning {
                     Ok(map_response_stream(
@@ -147,6 +182,8 @@ impl ModelClient {
     /// This path is only used when the provider is configured with
     /// `WireApi::Chat`; it does not support `output_schema` today.
     async fn stream_chat_completions(&self, prompt: &Prompt) -> Result<ApiResponseStream> {
+        tracing::debug!("🔗 [ModelClient::stream_chat_completions] 使用 Chat Completions API");
+
         if prompt.output_schema.is_some() {
             return Err(CodexErr::UnsupportedOperation(
                 "output_schema is not supported for Chat Completions API".to_string(),
@@ -157,9 +194,49 @@ impl ModelClient {
         let model_family = self.get_model_family();
         let instructions = prompt.get_full_instructions(&model_family).into_owned();
         let tools_json = create_tools_json_for_chat_completions_api(&prompt.tools)?;
-        let api_prompt = build_api_prompt(prompt, instructions, tools_json);
+        let api_prompt = build_api_prompt(prompt, instructions.clone(), tools_json);
         let conversation_id = self.conversation_id.to_string();
         let session_source = self.session_source.clone();
+
+        // 🔍 DEBUG: 记录请求详情 - 完整的 system prompt (instructions)
+        tracing::info!(
+            "📤 [ModelClient::stream_chat_completions] 请求详情 - model: {}, conversation_id: {}, instructions_len: {}, input_items: {}",
+            self.config.model,
+            conversation_id,
+            instructions.len(),
+            prompt.input.len()
+        );
+
+        // 打印完整的 system prompt (instructions) - 多轮对话分析关键
+        tracing::info!(
+            "📋 [ModelClient::stream_chat_completions] System Prompt (Instructions) 完整内容:\n=== SYSTEM PROMPT START ===\n{}\n=== SYSTEM PROMPT END ===",
+            instructions
+        );
+
+        // 打印输入历史的统计摘要
+        let mut message_count = 0;
+        let mut function_call_count = 0;
+        let mut function_output_count = 0;
+        let mut other_count = 0;
+        for item in &prompt.input {
+            match item {
+                codex_protocol::models::ResponseItem::Message { .. } => message_count += 1,
+                codex_protocol::models::ResponseItem::FunctionCall { .. } => {
+                    function_call_count += 1
+                }
+                codex_protocol::models::ResponseItem::FunctionCallOutput { .. } => {
+                    function_output_count += 1
+                }
+                _ => other_count += 1,
+            }
+        }
+        tracing::info!(
+            "📊 [ModelClient::stream_chat_completions] Input 统计: messages={}, function_calls={}, function_outputs={}, others={}",
+            message_count,
+            function_call_count,
+            function_output_count,
+            other_count
+        );
 
         let mut refreshed = false;
         loop {
@@ -173,6 +250,8 @@ impl ModelClient {
             let client = ApiChatClient::new(transport, api_provider, api_auth)
                 .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
 
+            tracing::warn!("📡 [stream_chat_completions] 发送请求到 API...");
+
             let stream_result = client
                 .stream_prompt(
                     &self.config.model,
@@ -183,14 +262,26 @@ impl ModelClient {
                 .await;
 
             match stream_result {
-                Ok(stream) => return Ok(stream),
+                Ok(stream) => {
+                    tracing::warn!("✅ [stream_chat_completions] 成功获取响应流");
+                    return Ok(stream);
+                }
                 Err(ApiError::Transport(TransportError::Http { status, .. }))
                     if status == StatusCode::UNAUTHORIZED =>
                 {
+                    tracing::warn!(
+                        "⚠️ [ModelClient::stream_chat_completions] 401 Unauthorized, 尝试刷新认证"
+                    );
                     handle_unauthorized(status, &mut refreshed, &auth_manager, &auth).await?;
                     continue;
                 }
-                Err(err) => return Err(map_api_error(err)),
+                Err(err) => {
+                    tracing::error!(
+                        "❌ [ModelClient::stream_chat_completions] API 错误: {:?}",
+                        err
+                    );
+                    return Err(map_api_error(err));
+                }
             }
         }
     }
@@ -200,6 +291,8 @@ impl ModelClient {
     /// Handles SSE fixtures, reasoning summaries, verbosity, and the
     /// `text` controls used for output schemas.
     async fn stream_responses_api(&self, prompt: &Prompt) -> Result<ResponseStream> {
+        tracing::debug!("🔗 [ModelClient::stream_responses_api] 使用 Responses API");
+
         if let Some(path) = &*CODEX_RS_SSE_FIXTURE {
             warn!(path, "Streaming from fixture");
             let stream = codex_api::stream_from_fixture(path, self.provider.stream_idle_timeout())
@@ -246,6 +339,58 @@ impl ModelClient {
         let conversation_id = self.conversation_id.to_string();
         let session_source = self.session_source.clone();
 
+        // 🔍 DEBUG: 记录请求详情 - 完整的 system prompt (instructions)
+        tracing::info!(
+            "📤 [ModelClient::stream_responses_api] 请求详情 - model: {}, conversation_id: {}, instructions_len: {}, input_items: {}, reasoning: {:?}, verbosity: {:?}",
+            self.config.model,
+            conversation_id,
+            instructions.len(),
+            prompt.input.len(),
+            reasoning.as_ref().map(|r| format!("effort={:?}", r.effort)),
+            verbosity
+        );
+
+        // 打印完整的 system prompt (instructions) - 多轮对话分析关键
+        tracing::info!(
+            "📋 [ModelClient::stream_responses_api] System Prompt (Instructions) 完整内容:\n=== SYSTEM PROMPT START ===\n{}\n=== SYSTEM PROMPT END ===",
+            instructions
+        );
+
+        // 打印输入历史的统计摘要
+        let mut message_count = 0;
+        let mut function_call_count = 0;
+        let mut function_output_count = 0;
+        let mut other_count = 0;
+        for item in &prompt.input {
+            match item {
+                codex_protocol::models::ResponseItem::Message { .. } => message_count += 1,
+                codex_protocol::models::ResponseItem::FunctionCall { .. } => {
+                    function_call_count += 1
+                }
+                codex_protocol::models::ResponseItem::FunctionCallOutput { .. } => {
+                    function_output_count += 1
+                }
+                _ => other_count += 1,
+            }
+        }
+        tracing::info!(
+            "📊 [ModelClient::stream_responses_api] Input 统计: messages={}, function_calls={}, function_outputs={}, others={}",
+            message_count,
+            function_call_count,
+            function_output_count,
+            other_count
+        );
+
+        // 🔍 详细打印每轮对话的输入内容（用于分析提示语累积）
+        tracing::info!(
+            "📝 [ModelClient::stream_responses_api] === INPUT HISTORY START (多轮对话累积分析) ==="
+        );
+        for (i, item) in prompt.input.iter().enumerate() {
+            let item_summary = Self::format_response_item_for_log(item);
+            tracing::info!("📝 [Input {}]: {}", i, item_summary);
+        }
+        tracing::info!("📝 [ModelClient::stream_responses_api] === INPUT HISTORY END ===");
+
         let mut refreshed = false;
         loop {
             let auth = auth_manager.as_ref().and_then(|m| m.auth());
@@ -268,21 +413,30 @@ impl ModelClient {
                 session_source: Some(session_source.clone()),
             };
 
+            tracing::warn!("📡 [stream_responses_api] 发送请求到 API...");
+
             let stream_result = client
                 .stream_prompt(&self.config.model, &api_prompt, options)
                 .await;
 
             match stream_result {
                 Ok(stream) => {
+                    tracing::warn!("✅ [stream_responses_api] 成功获取响应流");
                     return Ok(map_response_stream(stream, self.otel_event_manager.clone()));
                 }
                 Err(ApiError::Transport(TransportError::Http { status, .. }))
                     if status == StatusCode::UNAUTHORIZED =>
                 {
+                    tracing::warn!(
+                        "⚠️ [ModelClient::stream_responses_api] 401 Unauthorized, 尝试刷新认证"
+                    );
                     handle_unauthorized(status, &mut refreshed, &auth_manager, &auth).await?;
                     continue;
                 }
-                Err(err) => return Err(map_api_error(err)),
+                Err(err) => {
+                    tracing::error!("❌ [ModelClient::stream_responses_api] API 错误: {:?}", err);
+                    return Err(map_api_error(err));
+                }
             }
         }
     }
@@ -321,6 +475,157 @@ impl ModelClient {
 
     pub fn get_auth_manager(&self) -> Option<Arc<AuthManager>> {
         self.auth_manager.clone()
+    }
+
+    /// 格式化 ResponseItem 用于日志输出 - 多轮对话分析关键
+    fn format_response_item_for_log(item: &ResponseItem) -> String {
+        match item {
+            ResponseItem::Message { id, role, content } => {
+                let content_preview: String = content
+                    .iter()
+                    .enumerate()
+                    .map(|(j, c)| match c {
+                        codex_protocol::models::ContentItem::OutputText { text } => {
+                            let preview = if text.len() > 500 {
+                                format!("{}...({}字符)", &text[..500], text.len())
+                            } else {
+                                text.clone()
+                            };
+                            format!("\n    content[{j}]: OutputText({preview})")
+                        }
+                        codex_protocol::models::ContentItem::InputText { text } => {
+                            let preview = if text.len() > 500 {
+                                format!("{}...({}字符)", &text[..500], text.len())
+                            } else {
+                                text.clone()
+                            };
+                            format!("\n    content[{j}]: InputText({preview})")
+                        }
+                        codex_protocol::models::ContentItem::InputImage { image_url } => {
+                            format!(
+                                "\n    content[{}]: InputImage(url={}...)",
+                                j,
+                                &image_url[..image_url.len().min(50)]
+                            )
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                format!("Message(id={id:?}, role={role}):{content_preview}")
+            }
+            ResponseItem::Reasoning { id, summary, .. } => {
+                let summary_preview: String = summary
+                    .iter()
+                    .take(2)
+                    .map(|part| match part {
+                        codex_protocol::models::ReasoningItemReasoningSummary::SummaryText {
+                            text,
+                        } => {
+                            if text.len() > 200 {
+                                format!("{}...", &text[..200])
+                            } else {
+                                text.clone()
+                            }
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                format!(
+                    "Reasoning(id={id}, summary_count={}, preview={summary_preview})",
+                    summary.len()
+                )
+            }
+            ResponseItem::FunctionCall {
+                id,
+                name,
+                call_id,
+                arguments,
+                ..
+            } => {
+                let args_preview = if arguments.len() > 300 {
+                    format!("{}...({}字符)", &arguments[..300], arguments.len())
+                } else {
+                    arguments.clone()
+                };
+                format!(
+                    "FunctionCall(id={id:?}, name={name}, call_id={call_id}, args={args_preview})"
+                )
+            }
+            ResponseItem::FunctionCallOutput { call_id, output } => {
+                let output_preview = if output.content.len() > 300 {
+                    format!(
+                        "{}...({}字符)",
+                        &output.content[..300],
+                        output.content.len()
+                    )
+                } else {
+                    output.content.clone()
+                };
+                format!(
+                    "FunctionCallOutput(call_id={call_id}, output_len={}, preview={output_preview})",
+                    output.content.len()
+                )
+            }
+            ResponseItem::LocalShellCall {
+                id,
+                call_id,
+                action,
+                ..
+            } => {
+                let cmd_preview = match action {
+                    codex_protocol::models::LocalShellAction::Exec(exec) => {
+                        let cmd = exec.command.join(" ");
+                        if cmd.len() > 300 {
+                            format!("{}...({}字符)", &cmd[..300], cmd.len())
+                        } else {
+                            cmd
+                        }
+                    }
+                };
+                format!("LocalShellCall(id={id:?}, call_id={call_id:?}, cmd={cmd_preview})")
+            }
+            ResponseItem::CustomToolCall {
+                id,
+                name,
+                call_id,
+                input,
+                status,
+            } => {
+                let input_preview = if input.len() > 300 {
+                    format!("{}...({}字符)", &input[..300], input.len())
+                } else {
+                    input.clone()
+                };
+                format!(
+                    "CustomToolCall(id={id:?}, name={name}, call_id={call_id}, status={status:?}, input={input_preview})"
+                )
+            }
+            ResponseItem::CustomToolCallOutput { call_id, output } => {
+                let output_preview = if output.len() > 300 {
+                    format!("{}...({}字符)", &output[..300], output.len())
+                } else {
+                    output.clone()
+                };
+                format!(
+                    "CustomToolCallOutput(call_id={call_id}, output_len={}, preview={output_preview})",
+                    output.len()
+                )
+            }
+            ResponseItem::WebSearchCall { id, status, action } => {
+                let query = match action {
+                    codex_protocol::models::WebSearchAction::Search { query } => query.clone(),
+                    codex_protocol::models::WebSearchAction::OpenPage { url } => url.clone(),
+                    codex_protocol::models::WebSearchAction::FindInPage { url, .. } => url.clone(),
+                    codex_protocol::models::WebSearchAction::Other => None,
+                };
+                format!("WebSearchCall(id={id:?}, status={status:?}, query={query:?})")
+            }
+            ResponseItem::GhostSnapshot { ghost_commit } => {
+                format!("GhostSnapshot(id={ghost_commit})")
+            }
+            ResponseItem::CompactionSummary { .. } => "CompactionSummary".to_string(),
+            ResponseItem::Other => "Other".to_string(),
+        }
     }
 
     /// Compacts the current conversation history using the Compact endpoint.
@@ -413,19 +718,38 @@ where
     tokio::spawn(async move {
         let mut logged_error = false;
         let mut api_stream = api_stream;
+        let mut event_count = 0u32;
+
         while let Some(event) = api_stream.next().await {
+            event_count += 1;
+
             match event {
                 Ok(ResponseEvent::Completed {
                     response_id,
                     token_usage,
                 }) => {
+                    // 🔍 DEBUG: 记录完成事件和 token 使用情况
                     if let Some(usage) = &token_usage {
+                        tracing::debug!(
+                            "📊 [ResponseStream] 完成 - response_id: {:?}, input_tokens: {}, output_tokens: {}, cached: {}, reasoning: {}, total: {}",
+                            response_id,
+                            usage.input_tokens,
+                            usage.output_tokens,
+                            usage.cached_input_tokens,
+                            usage.reasoning_output_tokens,
+                            usage.total_tokens
+                        );
                         manager.sse_event_completed(
                             usage.input_tokens,
                             usage.output_tokens,
                             Some(usage.cached_input_tokens),
                             Some(usage.reasoning_output_tokens),
                             usage.total_tokens,
+                        );
+                    } else {
+                        tracing::debug!(
+                            "📊 [ResponseStream] 完成 - response_id: {:?}, no token usage",
+                            response_id
                         );
                     }
                     if tx_event
@@ -439,13 +763,24 @@ where
                         return;
                     }
                 }
-                Ok(event) => {
-                    if tx_event.send(Ok(event)).await.is_err() {
+                Ok(event_data) => {
+                    // 🔍 DEBUG: 记录响应事件（每10个事件记录一次，避免日志过多）
+                    if event_count <= 5 || event_count.is_multiple_of(10) {
+                        let event_summary = format!("{event_data:?}");
+                        let truncated = if event_summary.len() > 200 {
+                            format!("{}...(truncated)", &event_summary[..200])
+                        } else {
+                            event_summary
+                        };
+                        tracing::debug!("📥 [ResponseStream] 事件[{event_count}]: {truncated}");
+                    }
+                    if tx_event.send(Ok(event_data)).await.is_err() {
                         return;
                     }
                 }
                 Err(err) => {
                     let mapped = map_api_error(err);
+                    tracing::error!("❌ [ResponseStream] 错误: {:?}", mapped);
                     if !logged_error {
                         manager.see_event_completed_failed(&mapped);
                         logged_error = true;
@@ -456,6 +791,8 @@ where
                 }
             }
         }
+
+        tracing::debug!("📊 [ResponseStream] 流结束，共处理 {} 个事件", event_count);
     });
 
     ResponseStream { rx_event }

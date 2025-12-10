@@ -12,9 +12,8 @@ use codex_protocol::openai_models::ConfigShellToolType;
 /// with this content.
 const BASE_INSTRUCTIONS: &str = include_str!("../../prompt.md");
 
-const GPT_5_CODEX_INSTRUCTIONS: &str = include_str!("../../gpt_5_codex_prompt.md");
-const GPT_5_1_INSTRUCTIONS: &str = include_str!("../../gpt_5_1_prompt.md");
-const GPT_5_1_CODEX_MAX_INSTRUCTIONS: &str = include_str!("../../gpt-5.1-codex-max_prompt.md");
+// 注意：为节省 token，已移除模型特定的 prompt 文件
+// 所有模型统一使用 BASE_INSTRUCTIONS (prompt.md)
 
 /// A model family is a group of models that share certain characteristics.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -130,6 +129,7 @@ macro_rules! model_family {
 // todo(aibrahim): remove this function
 /// Returns a `ModelFamily` for the given model slug, or `None` if the slug
 /// does not match any known model family.
+#[allow(clippy::if_same_then_else)]
 pub fn find_family_for_model(slug: &str) -> ModelFamily {
     if slug.starts_with("o3") {
         model_family!(
@@ -166,7 +166,7 @@ pub fn find_family_for_model(slug: &str) -> ModelFamily {
             slug, slug,
             supports_reasoning_summaries: true,
             reasoning_summary_format: ReasoningSummaryFormat::Experimental,
-            base_instructions: GPT_5_CODEX_INSTRUCTIONS.to_string(),
+            base_instructions: BASE_INSTRUCTIONS.to_string(),
             experimental_supported_tools: vec![
                 "grep_files".to_string(),
                 "list_dir".to_string(),
@@ -185,7 +185,7 @@ pub fn find_family_for_model(slug: &str) -> ModelFamily {
             slug, slug,
             supports_reasoning_summaries: true,
             reasoning_summary_format: ReasoningSummaryFormat::Experimental,
-            base_instructions: GPT_5_CODEX_INSTRUCTIONS.to_string(),
+            base_instructions: BASE_INSTRUCTIONS.to_string(),
             apply_patch_tool_type: Some(ApplyPatchToolType::Freeform),
             experimental_supported_tools: vec![
                 "grep_files".to_string(),
@@ -217,7 +217,7 @@ pub fn find_family_for_model(slug: &str) -> ModelFamily {
             slug, slug,
             supports_reasoning_summaries: true,
             reasoning_summary_format: ReasoningSummaryFormat::Experimental,
-            base_instructions: GPT_5_1_CODEX_MAX_INSTRUCTIONS.to_string(),
+            base_instructions: BASE_INSTRUCTIONS.to_string(),
             apply_patch_tool_type: Some(ApplyPatchToolType::Freeform),
             shell_type: ConfigShellToolType::ShellCommand,
             supports_parallel_tool_calls: true,
@@ -232,7 +232,7 @@ pub fn find_family_for_model(slug: &str) -> ModelFamily {
             slug, slug,
             supports_reasoning_summaries: true,
             reasoning_summary_format: ReasoningSummaryFormat::Experimental,
-            base_instructions: GPT_5_CODEX_INSTRUCTIONS.to_string(),
+            base_instructions: BASE_INSTRUCTIONS.to_string(),
             apply_patch_tool_type: Some(ApplyPatchToolType::Freeform),
             shell_type: ConfigShellToolType::ShellCommand,
             supports_parallel_tool_calls: true,
@@ -246,7 +246,7 @@ pub fn find_family_for_model(slug: &str) -> ModelFamily {
             apply_patch_tool_type: Some(ApplyPatchToolType::Freeform),
             support_verbosity: true,
             default_verbosity: Some(Verbosity::Low),
-            base_instructions: GPT_5_1_INSTRUCTIONS.to_string(),
+            base_instructions: BASE_INSTRUCTIONS.to_string(),
             default_reasoning_effort: Some(ReasoningEffort::Medium),
             truncation_policy: TruncationPolicy::Bytes(10_000),
             shell_type: ConfigShellToolType::ShellCommand,

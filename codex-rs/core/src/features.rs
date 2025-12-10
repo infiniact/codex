@@ -103,12 +103,28 @@ pub struct FeatureOverrides {
 
 impl FeatureOverrides {
     fn apply(self, features: &mut Features) {
-        LegacyFeatureToggles {
-            include_apply_patch_tool: self.include_apply_patch_tool,
-            tools_web_search: self.web_search_request,
-            ..Default::default()
+        // 直接操作 Features，避免触发 legacy 警告
+        if let Some(enabled) = self.include_apply_patch_tool {
+            if enabled {
+                features.enable(Feature::ApplyPatchFreeform);
+            } else {
+                features.disable(Feature::ApplyPatchFreeform);
+            }
         }
-        .apply(features);
+        if let Some(enabled) = self.web_search_request {
+            if enabled {
+                features.enable(Feature::WebSearchRequest);
+            } else {
+                features.disable(Feature::WebSearchRequest);
+            }
+        }
+        if let Some(enabled) = self.experimental_sandbox_command_assessment {
+            if enabled {
+                features.enable(Feature::SandboxCommandAssessment);
+            } else {
+                features.disable(Feature::SandboxCommandAssessment);
+            }
+        }
     }
 }
 

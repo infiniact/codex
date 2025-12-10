@@ -5,6 +5,7 @@ use crate::RolloutRecorder;
 use crate::mcp_connection_manager::McpConnectionManager;
 use crate::openai_models::models_manager::ModelsManager;
 use crate::tools::sandboxing::ApprovalStore;
+use crate::unified_exec::PtyServiceBridge;
 use crate::unified_exec::UnifiedExecSessionManager;
 use crate::user_notification::UserNotifier;
 use codex_otel::otel_event_manager::OtelEventManager;
@@ -24,4 +25,6 @@ pub(crate) struct SessionServices {
     pub(crate) models_manager: Arc<ModelsManager>,
     pub(crate) otel_event_manager: OtelEventManager,
     pub(crate) tool_approvals: Mutex<ApprovalStore>,
+    /// Optional PTY service bridge for external PTY integration (e.g., iaterm)
+    pub(crate) pty_bridge: Option<Arc<dyn PtyServiceBridge>>,
 }

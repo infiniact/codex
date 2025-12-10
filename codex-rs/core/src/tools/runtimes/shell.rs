@@ -20,6 +20,7 @@ use crate::tools::sandboxing::ToolCtx;
 use crate::tools::sandboxing::ToolError;
 use crate::tools::sandboxing::ToolRuntime;
 use crate::tools::sandboxing::with_cached_approval;
+use crate::unified_exec::format_command_for_execution;
 use codex_protocol::protocol::ReviewDecision;
 use futures::future::BoxFuture;
 use std::path::PathBuf;
@@ -155,6 +156,62 @@ impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
         attempt: &SandboxAttempt<'_>,
         ctx: &ToolCtx<'_>,
     ) -> Result<ExecToolCallOutput, ToolError> {
+        // Check if PTY bridge is available and has associated connection
+        if let Some(ref pty_bridge) = ctx.session.services.pty_bridge {
+            // Get the connection_id for this conversation
+            let conversation_id = ctx.session.get_conversation_id().to_string();
+            if let Some(connection_id) = crate::unified_exec::get_global_conversation_connection(&conversation_id).await {
+                tracing::info!(
+                    "Using PTY bridge for command execution. conversation_id={}, connection_id={}",
+                    conversation_id,
+                    connection_id
+                );
+
+                // Build command string from command vec - 使用智能格式化处理 bash -c 等命令
+                let command_str = format_command_for_execution(&req.command);
+                let shell = ctx.session.user_shell().shell_path.to_string_lossy().to_string();
+
+                // Execute through PTY bridge
+                match pty_bridge.execute(
+                    &command_str,
+                    &shell,
+                    true,  // login shell
+                    true,  // display_in_panel
+                    Some(&connection_id),
+                    None,  // no stdin
+                ).await {
+                    Ok(result) => {
+                        tracing::info!(
+                            "PTY bridge execution completed. exit_code={:?}, output_len={}",
+                            result.exit_code,
+                            result.output.len()
+                        );
+                        return Ok(ExecToolCallOutput {
+                            exit_code: result.exit_code.unwrap_or(0),
+                            stdout: crate::exec::StreamOutput::new(result.output.clone()),
+                            stderr: crate::exec::StreamOutput::new(String::new()),
+                            aggregated_output: crate::exec::StreamOutput::new(result.output),
+                            duration: std::time::Duration::ZERO,
+                            timed_out: false,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "PTY bridge execution failed, falling back to local execution: {}",
+                            e
+                        );
+                        // Fall through to local execution
+                    }
+                }
+            } else {
+                tracing::debug!(
+                    "No connection_id found for conversation {}, using local execution",
+                    conversation_id
+                );
+            }
+        }
+
+        // Fall back to local execution (original implementation)
         let spec = build_command_spec(
             &req.command,
             &req.cwd,
