@@ -1,11 +1,12 @@
 #![allow(clippy::needless_lifetimes)]
 
-use crate::Opt;
+use crate::opt::Opt;
 use crate::Policy;
-use crate::ProgramSpec;
+use crate::program::ProgramSpec;
 use crate::arg_matcher::ArgMatcher;
 use crate::opt::OptMeta;
 use log::info;
+use starlark::starlark_module;
 use multimap::MultiMap;
 use regex_lite::Regex;
 use starlark::any::ProvidesStaticType;
@@ -72,6 +73,7 @@ impl PolicyParser {
 }
 
 #[derive(Debug)]
+#[derive(Clone)]
 pub struct ForbiddenProgramRegex {
     pub regex: regex_lite::Regex,
     pub reason: String,
@@ -97,7 +99,11 @@ impl PolicyBuilder {
         let programs = self.programs.into_inner();
         let forbidden_program_regexes = self.forbidden_program_regexes.into_inner();
         let forbidden_substrings = self.forbidden_substrings.into_inner();
-        Policy::new(programs, forbidden_program_regexes, forbidden_substrings)
+        Ok(Policy::new(
+            programs,
+            forbidden_program_regexes,
+            forbidden_substrings,
+        ))
     }
 
     fn add_program_spec(&self, program_spec: ProgramSpec) {
@@ -119,10 +125,12 @@ impl PolicyBuilder {
 }
 
 #[starlark_module]
+#[allow(clippy::too_many_arguments)]
 fn policy_builtins(builder: &mut GlobalsBuilder) {
+    #[allow(clippy::too_many_arguments)]
     fn define_program<'v>(
         program: String,
-        system_path: Option<UnpackList<String>>,
+        system_path: Option<UnpackList<String>>, 
         option_bundling: Option<bool>,
         combined_format: Option<bool>,
         options: Option<UnpackList<Opt>>,

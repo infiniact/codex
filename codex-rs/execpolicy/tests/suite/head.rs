@@ -34,7 +34,7 @@ fn test_head_no_args() {
             program: "head".to_string(),
             matcher: ArgMatcher::ReadableFiles,
         }),
-        policy.check(&head)
+        policy.check_exec(&head)
     )
 }
 
@@ -54,7 +54,7 @@ fn test_head_one_file_no_flags() -> Result<()> {
                 &["/bin/head", "/usr/bin/head"]
             )
         }),
-        policy.check(&head)
+        policy.check_exec(&head)
     );
     Ok(())
 }
@@ -80,7 +80,7 @@ fn test_head_one_flag_one_file() -> Result<()> {
                 system_path: vec!["/bin/head".to_string(), "/usr/bin/head".to_string()],
             }
         }),
-        policy.check(&head)
+        policy.check_exec(&head)
     );
     Ok(())
 }
@@ -93,7 +93,7 @@ fn test_head_invalid_n_as_0() {
         Err(Error::InvalidPositiveInteger {
             value: "0".to_string(),
         }),
-        policy.check(&head)
+        policy.check_exec(&head)
     )
 }
 
@@ -105,7 +105,7 @@ fn test_head_invalid_n_as_nonint_float() {
         Err(Error::InvalidPositiveInteger {
             value: "1.5".to_string(),
         }),
-        policy.check(&head)
+        policy.check_exec(&head)
     )
 }
 
@@ -117,7 +117,7 @@ fn test_head_invalid_n_as_float() {
         Err(Error::InvalidPositiveInteger {
             value: "1.0".to_string(),
         }),
-        policy.check(&head)
+        policy.check_exec(&head)
     )
 }
 
@@ -131,6 +131,6 @@ fn test_head_invalid_n_as_negative_int() {
             option: "-n".to_string(),
             value: "-1".to_string(),
         }),
-        policy.check(&head)
+        policy.check_exec(&head)
     )
 }

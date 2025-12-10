@@ -27,7 +27,7 @@ fn test_pwd_no_args() {
                 ..Default::default()
             }
         }),
-        policy.check(&pwd)
+        policy.check_exec(&pwd)
     );
 }
 
@@ -43,7 +43,7 @@ fn test_pwd_capital_l() {
                 ..Default::default()
             }
         }),
-        policy.check(&pwd)
+        policy.check_exec(&pwd)
     );
 }
 
@@ -59,7 +59,7 @@ fn test_pwd_capital_p() {
                 ..Default::default()
             }
         }),
-        policy.check(&pwd)
+        policy.check_exec(&pwd)
     );
 }
 
@@ -81,6 +81,6 @@ fn test_pwd_extra_args() {
                 },
             ],
         }),
-        policy.check(&pwd)
+        policy.check_exec(&pwd)
     );
 }

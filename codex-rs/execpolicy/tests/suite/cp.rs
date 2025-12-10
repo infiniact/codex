@@ -26,7 +26,7 @@ fn test_cp_no_args() {
             args: vec![],
             arg_patterns: vec![ArgMatcher::ReadableFiles, ArgMatcher::WriteableFile]
         }),
-        policy.check(&cp)
+        policy.check_exec(&cp)
     )
 }
 
@@ -40,7 +40,7 @@ fn test_cp_one_arg() {
             program: "cp".to_string(),
             matcher: ArgMatcher::ReadableFiles,
         }),
-        policy.check(&cp)
+        policy.check_exec(&cp)
     );
 }
 
@@ -59,7 +59,7 @@ fn test_cp_one_file() -> Result<()> {
                 &["/bin/cp", "/usr/bin/cp"]
             )
         }),
-        policy.check(&cp)
+        policy.check_exec(&cp)
     );
     Ok(())
 }
@@ -80,7 +80,7 @@ fn test_cp_multiple_files() -> Result<()> {
                 &["/bin/cp", "/usr/bin/cp"]
             )
         }),
-        policy.check(&cp)
+        policy.check_exec(&cp)
     );
     Ok(())
 }

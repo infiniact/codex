@@ -25,6 +25,10 @@ serde_json = { workspace = true }
 shlex = { workspace = true }
 starlark = { workspace = true }
 thiserror = { workspace = true }
+regex-lite = "0.1"
+allocative = "0.3"
+derive_more = { version = "1.0", features = ["display"] }
+log = "0.4"
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

@@ -52,13 +52,13 @@ impl PolicyParser {
             policy_file_contents.to_string(),
             &dialect,
         )
-        .map_err(Error::Starlark)?;
+        .map_err(|e| Error::Starlark(e.to_string()))?;
         let globals = GlobalsBuilder::standard().with(policy_builtins).build();
         let module = Module::new();
         {
             let mut eval = Evaluator::new(&module);
             eval.extra = Some(&self.builder);
-            eval.eval_module(ast, &globals).map_err(Error::Starlark)?;
+            eval.eval_module(ast, &globals).map_err(|e| Error::Starlark(e.to_string()))?;
         }
         Ok(())
     }
@@ -86,7 +86,7 @@ impl PolicyBuilder {
     }
 
     fn build(self) -> crate::policy::Policy {
-        crate::policy::Policy::new(self.rules_by_program)
+        crate::policy::Policy::from_rules(self.rules_by_program)
     }
 }
 

@@ -24,7 +24,7 @@ fn test_ls_no_args() {
         Ok(MatchedExec::Match {
             exec: ValidExec::new("ls", vec![], &["/bin/ls", "/usr/bin/ls"])
         }),
-        policy.check(&ls)
+        policy.check_exec(&ls)
     );
 }
 
@@ -42,7 +42,7 @@ fn test_ls_dash_a_dash_l() {
                 ..Default::default()
             }
         }),
-        policy.check(&ls_a_l)
+        policy.check_exec(&ls_a_l)
     );
 }
 
@@ -58,7 +58,7 @@ fn test_ls_dash_z() {
             program: "ls".into(),
             option: "-z".into()
         }),
-        policy.check(&ls_z)
+        policy.check_exec(&ls_z)
     );
 }
 
@@ -73,7 +73,7 @@ fn test_ls_dash_al() {
             program: "ls".into(),
             option: "-al".into()
         }),
-        policy.check(&ls_al)
+        policy.check_exec(&ls_al)
     );
 }
 
@@ -90,7 +90,7 @@ fn test_ls_one_file_arg() -> Result<()> {
                 &["/bin/ls", "/usr/bin/ls"]
             )
         }),
-        policy.check(&ls_one_file_arg)
+        policy.check_exec(&ls_one_file_arg)
     );
     Ok(())
 }
@@ -112,7 +112,7 @@ fn test_ls_multiple_file_args() -> Result<()> {
                 &["/bin/ls", "/usr/bin/ls"]
             )
         }),
-        policy.check(&ls_multiple_file_args)
+        policy.check_exec(&ls_multiple_file_args)
     );
     Ok(())
 }
@@ -136,7 +136,7 @@ fn test_ls_multiple_flags_and_file_args() -> Result<()> {
                 ..Default::default()
             }
         }),
-        policy.check(&ls_multiple_flags_and_file_args)
+        policy.check_exec(&ls_multiple_flags_and_file_args)
     );
     Ok(())
 }
@@ -161,7 +161,7 @@ fn test_flags_after_file_args() -> Result<()> {
                 ..Default::default()
             }
         }),
-        policy.check(&ls_flags_after_file_args)
+        policy.check_exec(&ls_flags_after_file_args)
     );
     Ok(())
 }

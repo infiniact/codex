@@ -9,7 +9,7 @@ use codex_execpolicy::Decision;
 use codex_execpolicy::Error as ExecPolicyRuleError;
 use codex_execpolicy::Evaluation;
 use codex_execpolicy::Policy;
-use codex_execpolicy::PolicyParser;
+use codex_execpolicy::parser::PolicyParser;
 use codex_execpolicy::RuleMatch;
 use codex_execpolicy::blocking_append_allow_prefix_rule;
 use codex_protocol::approvals::ExecPolicyAmendment;

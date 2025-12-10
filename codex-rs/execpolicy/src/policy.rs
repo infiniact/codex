@@ -1,11 +1,16 @@
 use crate::decision::Decision;
 use crate::error::Error;
 use crate::error::Result;
+use crate::exec_call::ExecCall;
+use crate::program::NegativeExamplePassedCheck;
+use crate::program::ProgramSpec;
+use crate::program::MatchedExec;
 use crate::rule::PatternToken;
 use crate::rule::PrefixPattern;
 use crate::rule::PrefixRule;
 use crate::rule::RuleMatch;
 use crate::rule::RuleRef;
+use crate::policy_parser::ForbiddenProgramRegex;
 use multimap::MultiMap;
 use serde::Deserialize;
 use serde::Serialize;
@@ -14,17 +19,39 @@ use std::sync::Arc;
 type HeuristicsFallback<'a> = Option<&'a dyn Fn(&[String]) -> Decision>;
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct Policy {
     rules_by_program: MultiMap<String, RuleRef>,
+    programs: MultiMap<String, ProgramSpec>,
+    forbidden_program_regexes: Vec<ForbiddenProgramRegex>,
+    forbidden_substrings: Vec<String>,
 }
 
 impl Policy {
-    pub fn new(rules_by_program: MultiMap<String, RuleRef>) -> Self {
-        Self { rules_by_program }
+    pub fn from_rules(rules_by_program: MultiMap<String, RuleRef>) -> Self {
+        Self {
+            rules_by_program,
+            programs: MultiMap::new(),
+            forbidden_program_regexes: Vec::new(),
+            forbidden_substrings: Vec::new(),
+        }
+    }
+
+    pub fn new(
+        programs: MultiMap<String, ProgramSpec>,
+        forbidden_program_regexes: Vec<ForbiddenProgramRegex>,
+        forbidden_substrings: Vec<String>,
+    ) -> Self {
+        Self {
+            rules_by_program: MultiMap::new(),
+            programs,
+            forbidden_program_regexes,
+            forbidden_substrings,
+        }
     }
 
     pub fn empty() -> Self {
-        Self::new(MultiMap::new())
+        Self::new(MultiMap::new(), Vec::new(), Vec::new())
     }
 
     pub fn rules(&self) -> &MultiMap<String, RuleRef> {
@@ -102,6 +129,42 @@ impl Policy {
         }
 
         matched_rules
+    }
+
+    pub fn check_exec(&self, exec_call: &ExecCall) -> Result<MatchedExec> {
+        let binding: Vec<ProgramSpec> = Vec::new();
+        let specs = self.programs.get_vec(&exec_call.program).unwrap_or(&binding);
+        // Try specs in order; return first match or forbidden
+        for spec in specs {
+            match spec.check(exec_call) {
+                Ok(matched) => return Ok(matched),
+                Err(_) => continue,
+            }
+        }
+        Err(Error::InvalidExample(format!(
+            "no matching program spec for {}",
+            exec_call.program
+        )))
+    }
+
+    pub fn check_each_bad_list_individually(&self) -> Vec<NegativeExamplePassedCheck> {
+        let mut out = Vec::new();
+        for (_name, specs) in self.programs.iter_all() {
+            for spec in specs {
+                out.extend(spec.verify_should_not_match_list());
+            }
+        }
+        out
+    }
+
+    pub fn check_each_good_list_individually(&self) -> Vec<crate::program::PositiveExampleFailedCheck> {
+        let mut out = Vec::new();
+        for (_name, specs) in self.programs.iter_all() {
+            for spec in specs {
+                out.extend(spec.verify_should_match_list());
+            }
+        }
+        out
     }
 }
 

@@ -7,7 +7,7 @@ use codex_execpolicy::Decision;
 use codex_execpolicy::Error;
 use codex_execpolicy::Evaluation;
 use codex_execpolicy::Policy;
-use codex_execpolicy::PolicyParser;
+use codex_execpolicy::parser::PolicyParser;
 use codex_execpolicy::RuleMatch;
 use codex_execpolicy::RuleRef;
 use codex_execpolicy::rule::PatternToken;

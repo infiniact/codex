@@ -35,7 +35,7 @@ define_program(
                 &[]
             )
         }),
-        policy.check(&valid_call)
+        policy.check_exec(&valid_call)
     );
 
     let invalid_call = ExecCall::new("fake_executable", &["subcommand", "not-a-real-subcommand"]);
@@ -44,7 +44,7 @@ define_program(
             expected: "sub-subcommand".to_string(),
             actual: "not-a-real-subcommand".to_string()
         }),
-        policy.check(&invalid_call)
+        policy.check_exec(&invalid_call)
     );
     Ok(())
 }

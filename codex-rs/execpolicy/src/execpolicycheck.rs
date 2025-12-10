@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::Decision;
 use crate::Policy;
-use crate::PolicyParser;
+use crate::parser::PolicyParser;
 use crate::RuleMatch;
 
 /// Arguments for evaluating a command against one or more execpolicy files.

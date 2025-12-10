@@ -1278,10 +1278,14 @@ dependencies = [
 name = "codex-execpolicy"
 version = "0.0.0"
 dependencies = [
+ "allocative",
  "anyhow",
  "clap",
+ "derive_more 1.0.0",
+ "log",
  "multimap",
  "pretty_assertions",
+ "regex-lite",
  "serde",
  "serde_json",
  "shlex",

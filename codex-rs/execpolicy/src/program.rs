@@ -15,7 +15,7 @@ use crate::valid_exec::MatchedFlag;
 use crate::valid_exec::MatchedOpt;
 use crate::valid_exec::ValidExec;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ProgramSpec {
     pub program: String,
     pub system_path: Vec<String>,
@@ -30,6 +30,7 @@ pub struct ProgramSpec {
 }
 
 impl ProgramSpec {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         program: String,
         system_path: Vec<String>,

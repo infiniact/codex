@@ -34,7 +34,7 @@ fn test_sed_print_specific_lines() -> Result<()> {
                 ..Default::default()
             }
         }),
-        policy.check(&sed)
+        policy.check_exec(&sed)
     );
     Ok(())
 }
@@ -56,7 +56,7 @@ fn test_sed_print_specific_lines_with_e_flag() -> Result<()> {
                 system_path: vec!["/usr/bin/sed".to_string()],
             }
         }),
-        policy.check(&sed)
+        policy.check_exec(&sed)
     );
     Ok(())
 }
@@ -69,7 +69,7 @@ fn test_sed_reject_dangerous_command() {
         Err(Error::SedCommandNotProvablySafe {
             command: "s/y/echo hi/e".to_string(),
         }),
-        policy.check(&sed)
+        policy.check_exec(&sed)
     );
 }
 
@@ -82,6 +82,6 @@ fn test_sed_verify_e_or_pattern_is_required() {
             program: "sed".to_string(),
             options: vec!["-e".to_string()],
         }),
-        policy.check(&sed)
+        policy.check_exec(&sed)
     );
 }

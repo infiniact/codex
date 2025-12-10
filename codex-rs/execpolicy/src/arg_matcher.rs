@@ -1,7 +1,7 @@
 #![allow(clippy::needless_lifetimes)]
 
 use crate::arg_type::ArgType;
-use crate::starlark::values::ValueLike;
+use starlark::values::ValueLike;
 use allocative::Allocative;
 use derive_more::derive::Display;
 use starlark::any::ProvidesStaticType;
