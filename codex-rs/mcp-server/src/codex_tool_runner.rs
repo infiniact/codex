@@ -181,6 +181,7 @@ async fn run_codex_tool_session_inner(
                         reason: _,
                         proposed_execpolicy_amendment: _,
                         parsed_cmd,
+                        ..
                     }) => {
                         handle_exec_approval_request(
                             command,
@@ -279,7 +280,6 @@ async fn run_codex_tool_session_inner(
                     | EventMsg::McpToolCallEnd(_)
                     | EventMsg::McpListToolsResponse(_)
                     | EventMsg::ListCustomPromptsResponse(_)
-                    | EventMsg::ListSkillsResponse(_)
                     | EventMsg::ExecCommandBegin(_)
                     | EventMsg::TerminalInteraction(_)
                     | EventMsg::ExecCommandOutputDelta(_)
@@ -304,12 +304,13 @@ async fn run_codex_tool_session_inner(
                     | EventMsg::AgentMessageContentDelta(_)
                     | EventMsg::ReasoningContentDelta(_)
                     | EventMsg::ReasoningRawContentDelta(_)
-                    | EventMsg::SkillsUpdateAvailable
                     | EventMsg::UndoStarted(_)
                     | EventMsg::UndoCompleted(_)
                     | EventMsg::ExitedReviewMode(_)
                     | EventMsg::ContextCompacted(_)
-                    | EventMsg::DeprecationNotice(_) => {
+                    | EventMsg::DeprecationNotice(_)
+                    | EventMsg::ListSkillsResponse(_)
+                    | EventMsg::SkillsUpdateAvailable => {
                         // For now, we do not do anything extra for these
                         // events. Note that
                         // send(codex_event_to_notification(&event)) above has

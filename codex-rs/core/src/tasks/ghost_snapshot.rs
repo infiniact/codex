@@ -7,6 +7,7 @@ use crate::tasks::SessionTaskContext;
 use async_trait::async_trait;
 use codex_git::CreateGhostCommitOptions;
 use codex_git::GhostSnapshotReport;
+use codex_git::GhostSnapshotConfig;
 use codex_git::GitToolingError;
 use codex_git::create_ghost_commit_with_report;
 use codex_protocol::models::ResponseItem;
@@ -41,7 +42,8 @@ impl SessionTask for GhostSnapshotTask {
     ) -> Option<String> {
         tokio::task::spawn(async move {
             let token = self.token;
-            let warnings_enabled = !ctx.ghost_snapshot.disable_warnings;
+            // Default to warnings enabled - ghost_snapshot config not available in TurnContext
+            let warnings_enabled = true;
             // Channel used to signal when the snapshot work has finished so the
             // timeout warning task can exit early without sending a warning.
             let (snapshot_done_tx, snapshot_done_rx) = oneshot::channel::<()>();
@@ -73,12 +75,14 @@ impl SessionTask for GhostSnapshotTask {
             }
 
             let ctx_for_task = ctx.clone();
+            // Use default GhostSnapshotConfig since not available in TurnContext
+            let ghost_snapshot = GhostSnapshotConfig::default();
+            let ghost_snapshot_for_commit = ghost_snapshot.clone();
+            let ghost_snapshot_for_warnings = ghost_snapshot.clone();
             let cancelled = tokio::select! {
                 _ = cancellation_token.cancelled() => true,
                 _ = async {
                     let repo_path = ctx_for_task.cwd.clone();
-                    let ghost_snapshot = ctx_for_task.ghost_snapshot.clone();
-                    let ghost_snapshot_for_commit = ghost_snapshot.clone();
                     // Required to run in a dedicated blocking pool.
                     match tokio::task::spawn_blocking(move || {
                         let options =
@@ -91,8 +95,8 @@ impl SessionTask for GhostSnapshotTask {
                             info!("ghost snapshot blocking task finished");
                             if warnings_enabled {
                                 for message in format_snapshot_warnings(
-                                    ghost_snapshot.ignore_large_untracked_files,
-                                    ghost_snapshot.ignore_large_untracked_dirs,
+                                    ghost_snapshot_for_warnings.ignore_large_untracked_files,
+                                    ghost_snapshot_for_warnings.ignore_large_untracked_dirs,
                                     &report,
                                 ) {
                                     session

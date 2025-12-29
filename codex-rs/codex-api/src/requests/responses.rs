@@ -201,7 +201,7 @@ impl<'a> ResponsesRequestBuilder<'a> {
                 ResponseItem::CustomToolCall { name, call_id, .. } => format!("CustomToolCall(name={name}, call_id={call_id})"),
                 ResponseItem::CustomToolCallOutput { call_id, .. } => format!("CustomToolCallOutput(call_id={call_id})"),
                 ResponseItem::GhostSnapshot { .. } => "GhostSnapshot".to_string(),
-                ResponseItem::CompactionSummary { .. } => "CompactionSummary".to_string(),
+                ResponseItem::Compaction { .. } => "Compaction".to_string(),
                 ResponseItem::Other => "Other".to_string(),
             };
             debug!("📤 [ResponsesRequest::build] input[{}]: {}", i, item_type);

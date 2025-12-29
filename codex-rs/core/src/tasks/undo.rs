@@ -86,7 +86,8 @@ impl SessionTask for UndoTask {
 
         let commit_id = ghost_commit.id().to_string();
         let repo_path = ctx.cwd.clone();
-        let ghost_snapshot = ctx.ghost_snapshot.clone();
+        // Use default GhostSnapshotConfig since not available in TurnContext
+        let ghost_snapshot = codex_git::GhostSnapshotConfig::default();
         let restore_result = tokio::task::spawn_blocking(move || {
             let options = RestoreGhostCommitOptions::new(&repo_path).ghost_snapshot(ghost_snapshot);
             restore_ghost_commit_with_options(&options, &ghost_commit)

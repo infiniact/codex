@@ -1407,7 +1407,7 @@ impl CodexMessageProcessor {
                 if let Err(err) = self
                     .attach_conversation_listener(
                         conversation_id,
-                        params.experimental_raw_events,
+                        params.experimental_raw_events.unwrap_or(false),
                         ApiVersion::V2,
                     )
                     .await

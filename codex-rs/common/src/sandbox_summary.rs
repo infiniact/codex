@@ -70,7 +70,7 @@ mod tests {
         let root = if cfg!(windows) { "C:\\repo" } else { "/repo" };
         let writable_root = AbsolutePathBuf::try_from(root).unwrap();
         let summary = summarize_sandbox_policy(&SandboxPolicy::WorkspaceWrite {
-            writable_roots: vec![writable_root.clone()],
+            writable_roots: vec![writable_root.clone().into()],
             network_access: true,
             exclude_tmpdir_env_var: true,
             exclude_slash_tmp: true,

@@ -93,7 +93,7 @@ pub(crate) async fn handle_output_item_done(
             let msg = "LocalShellCall without call_id or id";
             ctx.turn_context
                 .client
-                .get_otel_manager()
+                .get_otel_event_manager()
                 .log_tool_failed("local_shell", msg);
             tracing::error!(msg);
 

@@ -18,7 +18,7 @@ use codex_api::common::Reasoning;
 use codex_api::create_text_param_for_request;
 use codex_api::error::ApiError;
 use codex_app_server_protocol::AuthMode;
-use codex_otel::otel_event_manager::OtelEventManager;
+use codex_otel::otel_manager::OtelEventManager;
 use codex_protocol::ConversationId;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::models::ResponseItem;
@@ -48,7 +48,7 @@ use crate::error::Result;
 use crate::flags::CODEX_RS_SSE_FIXTURE;
 use crate::model_provider_info::ModelProviderInfo;
 use crate::model_provider_info::WireApi;
-use crate::openai_models::model_family::ModelFamily;
+use crate::models_manager::model_family::ModelFamily;
 use crate::tools::spec::create_tools_json_for_chat_completions_api;
 use crate::tools::spec::create_tools_json_for_responses_api;
 
@@ -119,7 +119,7 @@ impl ModelClient {
     pub async fn stream(&self, prompt: &Prompt) -> Result<ResponseStream> {
         tracing::warn!("🔄 [ModelClient::stream] ========== 进入 stream 函数 ==========");
         tracing::warn!(
-            "   model: {}, provider: {:?}, wire_api: {:?}",
+            "   model: {:?}, provider: {:?}, wire_api: {:?}",
             self.config.model,
             self.provider.name,
             self.provider.wire_api
@@ -132,7 +132,7 @@ impl ModelClient {
 
         // 🔍 DEBUG: 记录模型调用的输入信息
         tracing::debug!(
-            "🚀 [ModelClient::stream] 开始模型调用 - model: {}, provider: {:?}, wire_api: {:?}",
+            "🚀 [ModelClient::stream] 开始模型调用 - model: {:?}, provider: {:?}, wire_api: {:?}",
             self.config.model,
             self.provider.name,
             self.provider.wire_api
@@ -195,7 +195,7 @@ impl ModelClient {
 
         // 🔍 DEBUG: 记录请求详情 - 完整的 system prompt (instructions)
         tracing::info!(
-            "📤 [ModelClient::stream_chat_completions] 请求详情 - model: {}, conversation_id: {}, instructions_len: {}, input_items: {}",
+            "📤 [ModelClient::stream_chat_completions] 请求详情 - model: {:?}, conversation_id: {}, instructions_len: {}, input_items: {}",
             self.config.model,
             conversation_id,
             instructions.len(),
@@ -249,7 +249,7 @@ impl ModelClient {
 
             let stream_result = client
                 .stream_prompt(
-                    &self.config.model,
+                    self.config.model.as_deref().unwrap_or_default(),
                     &api_prompt,
                     Some(conversation_id.clone()),
                     Some(session_source.clone()),
@@ -337,7 +337,7 @@ impl ModelClient {
 
         // 🔍 DEBUG: 记录请求详情 - 完整的 system prompt (instructions)
         tracing::info!(
-            "📤 [ModelClient::stream_responses_api] 请求详情 - model: {}, conversation_id: {}, instructions_len: {}, input_items: {}, reasoning: {:?}, verbosity: {:?}",
+            "📤 [ModelClient::stream_responses_api] 请求详情 - model: {:?}, conversation_id: {}, instructions_len: {}, input_items: {}, reasoning: {:?}, verbosity: {:?}",
             self.config.model,
             conversation_id,
             instructions.len(),
@@ -413,7 +413,7 @@ impl ModelClient {
             tracing::warn!("📡 [stream_responses_api] 发送请求到 API...");
 
             let stream_result = client
-                .stream_prompt(&self.config.model, &api_prompt, options)
+                .stream_prompt(self.config.model.as_deref().unwrap_or_default(), &api_prompt, options)
                 .await;
 
             match stream_result {
@@ -452,7 +452,7 @@ impl ModelClient {
 
     /// Returns the currently configured model slug.
     pub fn get_model(&self) -> String {
-        self.config.model.clone()
+        self.config.model.clone().unwrap_or_default()
     }
 
     /// Returns the currently configured model family.
@@ -620,7 +620,7 @@ impl ModelClient {
             ResponseItem::GhostSnapshot { ghost_commit } => {
                 format!("GhostSnapshot(id={ghost_commit})")
             }
-            ResponseItem::CompactionSummary { .. } => "CompactionSummary".to_string(),
+            ResponseItem::Compaction { .. } => "Compaction".to_string(),
             ResponseItem::Other => "Other".to_string(),
         }
     }
@@ -648,7 +648,7 @@ impl ModelClient {
             .get_full_instructions(&self.get_model_family())
             .into_owned();
         let payload = ApiCompactionInput {
-            model: &self.config.model,
+            model: self.config.model.as_deref().unwrap_or_default(),
             input: &prompt.input,
             instructions: &instructions,
         };

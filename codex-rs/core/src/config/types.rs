@@ -985,3 +985,14 @@ mod tests {
         assert_eq!(cfg.max_total_calls_per_turn, None);
     }
 }
+
+/// Format for reasoning summaries returned by models that support them.
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq, Default, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReasoningSummaryFormat {
+    /// No reasoning summary.
+    #[default]
+    None,
+    /// Experimental reasoning summary format.
+    Experimental,
+}

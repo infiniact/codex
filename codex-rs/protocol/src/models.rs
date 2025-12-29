@@ -326,8 +326,8 @@ pub enum ResponseItem {
     GhostSnapshot {
         ghost_commit: GhostCommit,
     },
-    #[serde(alias = "compaction")]
-    CompactionSummary {
+    #[serde(alias = "compaction_summary")]
+    Compaction {
         encrypted_content: String,
     },
     #[serde(other)]
@@ -476,10 +476,12 @@ impl From<Vec<UserInput>> for ResponseInputItem {
             role: "user".to_string(),
             content: items
                 .into_iter()
-                .map(|c| match c {
-                    UserInput::Text { text } => ContentItem::InputText { text },
-                    UserInput::Image { image_url } => ContentItem::InputImage { image_url },
-                    UserInput::LocalImage { path } => match load_and_resize_to_fit(&path) {
+                .filter_map(|c| match c {
+                    UserInput::Text { text } => Some(ContentItem::InputText { text }),
+                    UserInput::Image { image_url } => Some(ContentItem::InputImage { image_url }),
+                    // Skill is handled separately via build_skill_injections, skip here.
+                    UserInput::Skill { .. } => None,
+                    UserInput::LocalImage { path } => Some(match load_and_resize_to_fit(&path) {
                         Ok(image) => ContentItem::InputImage {
                             image_url: image.into_data_url(),
                         },
@@ -490,24 +492,51 @@ impl From<Vec<UserInput>> for ResponseInputItem {
                                 invalid_image_error_placeholder(&path, &err)
                             } else {
                                 let Some(mime_guess) = mime_guess::from_path(&path).first() else {
-                                    return local_image_error_placeholder(
+                                    return Some(local_image_error_placeholder(
                                         &path,
                                         "unsupported MIME type (unknown)",
-                                    );
+                                    ));
                                 };
                                 let mime = mime_guess.essence_str().to_owned();
                                 if !mime.starts_with("image/") {
-                                    return local_image_error_placeholder(
+                                    return Some(local_image_error_placeholder(
                                         &path,
                                         format!("unsupported MIME type `{mime}`"),
-                                    );
+                                    ));
                                 }
                                 unsupported_image_error_placeholder(&path, &mime)
                             }
                         }
-                    },
+                    }),
                 })
                 .collect::<Vec<ContentItem>>(),
+        }
+    }
+}
+
+/// Sandbox permissions for a command execution.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxPermissions {
+    /// Run with the configured sandbox
+    #[default]
+    UseDefault,
+    /// Request to run outside the sandbox
+    RequireEscalated,
+}
+
+impl SandboxPermissions {
+    pub fn requires_escalated_permissions(self) -> bool {
+        matches!(self, SandboxPermissions::RequireEscalated)
+    }
+}
+
+impl From<bool> for SandboxPermissions {
+    fn from(escalated: bool) -> Self {
+        if escalated {
+            SandboxPermissions::RequireEscalated
+        } else {
+            SandboxPermissions::UseDefault
         }
     }
 }
@@ -528,6 +557,8 @@ pub struct ShellToolCallParams {
     pub timeout_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub with_escalated_permissions: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_permissions: Option<SandboxPermissions>,
     #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "optional_string_deserializer::deserialize")]
     pub justification: Option<String>,
     /// Optional stdin content to pass to the command
@@ -859,7 +890,7 @@ mod tests {
 
         assert_eq!(
             item,
-            ResponseItem::CompactionSummary {
+            ResponseItem::Compaction {
                 encrypted_content: "abc".into(),
             }
         );
@@ -948,6 +979,7 @@ mod tests {
                 workdir: Some("/tmp".to_string()),
                 timeout_ms: Some(1000),
                 with_escalated_permissions: None,
+                sandbox_permissions: None,
                 justification: None,
                 stdin: None,
             },
@@ -970,6 +1002,7 @@ mod tests {
                 workdir: None,
                 timeout_ms: None,
                 with_escalated_permissions: None,
+                sandbox_permissions: None,
                 justification: None,
                 stdin: None,
             },

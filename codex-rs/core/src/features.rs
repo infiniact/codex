@@ -94,6 +94,8 @@ pub enum Feature {
     Skills,
     /// Enforce UTF8 output in Powershell.
     PowershellUtf8,
+    /// Experimental sandbox command assessment feature.
+    SandboxCommandAssessment,
 }
 
 impl Feature {
@@ -134,6 +136,7 @@ pub struct Features {
 pub struct FeatureOverrides {
     pub include_apply_patch_tool: Option<bool>,
     pub web_search_request: Option<bool>,
+    pub experimental_sandbox_command_assessment: Option<bool>,
 }
 
 impl FeatureOverrides {
@@ -414,6 +417,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::Tui2,
         key: "tui2",
+        stage: Stage::Experimental,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::SandboxCommandAssessment,
+        key: "sandbox_command_assessment",
         stage: Stage::Experimental,
         default_enabled: false,
     },

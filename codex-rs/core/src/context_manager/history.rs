@@ -267,7 +267,7 @@ impl ContextManager {
                     encrypted_content: Some(content),
                     ..
                 }
-                | ResponseItem::CompactionSummary {
+                | ResponseItem::Compaction {
                     encrypted_content: content,
                 } => estimate_reasoning_length(content.len()) as i64,
                 item => {

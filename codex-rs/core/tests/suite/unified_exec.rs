@@ -1712,6 +1712,7 @@ async fn unified_exec_closes_long_running_session_at_turn_end() -> Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 

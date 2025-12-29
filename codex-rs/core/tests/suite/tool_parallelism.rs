@@ -359,6 +359,7 @@ async fn shell_tools_start_before_response_completed_when_stream_delayed() -> an
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 

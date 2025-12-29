@@ -22,6 +22,7 @@ use crate::tools::sandboxing::ToolRuntime;
 use crate::tools::sandboxing::with_cached_approval;
 use crate::bash::extract_bash_command;
 use crate::unified_exec::format_command_for_execution;
+use codex_protocol::models::SandboxPermissions;
 use codex_protocol::protocol::ReviewDecision;
 use futures::future::BoxFuture;
 use std::path::PathBuf;
@@ -106,7 +107,6 @@ impl Approvable<ShellRequest> for ShellRuntime {
             .retry_reason
             .clone()
             .or_else(|| req.justification.clone());
-        let risk = ctx.risk.clone();
         let session = ctx.session;
         let turn = ctx.turn;
         let call_id = ctx.call_id.to_string();
@@ -119,7 +119,7 @@ impl Approvable<ShellRequest> for ShellRuntime {
                         command,
                         cwd,
                         reason,
-                        risk,
+                        None, // risk assessment
                         req.exec_approval_requirement
                             .proposed_execpolicy_amendment()
                             .cloned(),
@@ -225,7 +225,7 @@ impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
             &req.cwd,
             &req.env,
             req.timeout_ms.into(),
-            req.with_escalated_permissions,
+            SandboxPermissions::from(req.with_escalated_permissions.unwrap_or(false)),
             req.justification.clone(),
         )?;
         let env = attempt

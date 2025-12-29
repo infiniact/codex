@@ -48,6 +48,9 @@ pub struct OtelEventManager {
     metadata: OtelEventMetadata,
 }
 
+/// Type alias for backward compatibility.
+pub type OtelManager = OtelEventManager;
+
 impl OtelEventManager {
     #[allow(clippy::too_many_arguments)]
     pub fn new(

@@ -985,7 +985,7 @@ impl ConfigToml {
                     exclude_tmpdir_env_var,
                     exclude_slash_tmp,
                 }) => SandboxPolicy::WorkspaceWrite {
-                    writable_roots: writable_roots.clone(),
+                    writable_roots: writable_roots.iter().map(|p| p.as_path().to_path_buf()).collect(),
                     network_access: *network_access,
                     exclude_tmpdir_env_var: *exclude_tmpdir_env_var,
                     exclude_slash_tmp: *exclude_slash_tmp,
@@ -1104,7 +1104,7 @@ pub fn resolve_oss_provider(
 
 impl Config {
     #[cfg(test)]
-    fn load_from_base_config_with_overrides(
+    pub(crate) fn load_from_base_config_with_overrides(
         cfg: ConfigToml,
         overrides: ConfigOverrides,
         codex_home: PathBuf,
@@ -1163,6 +1163,7 @@ impl Config {
         let feature_overrides = FeatureOverrides {
             include_apply_patch_tool: include_apply_patch_tool_override,
             web_search_request: override_tools_web_search_request,
+            experimental_sandbox_command_assessment: None,
         };
 
         let features = Features::from_config(&cfg, &config_profile, feature_overrides);
@@ -1208,8 +1209,9 @@ impl Config {
         } = cfg.derive_sandbox_policy(sandbox_mode, config_profile.sandbox_mode, &resolved_cwd);
         if let SandboxPolicy::WorkspaceWrite { writable_roots, .. } = &mut sandbox_policy {
             for path in additional_writable_roots {
-                if !writable_roots.iter().any(|existing| existing == &path) {
-                    writable_roots.push(path);
+                let path_buf: PathBuf = path.into();
+                if !writable_roots.iter().any(|existing| existing == &path_buf) {
+                    writable_roots.push(path_buf);
                 }
             }
         }
@@ -1740,7 +1742,7 @@ exclude_slash_tmp = true
                 resolution,
                 SandboxPolicyResolution {
                     policy: SandboxPolicy::WorkspaceWrite {
-                        writable_roots: vec![writable_root.clone()],
+                        writable_roots: vec![writable_root.clone().into()],
                         network_access: false,
                         exclude_tmpdir_env_var: true,
                         exclude_slash_tmp: true,
@@ -1788,7 +1790,7 @@ trust_level = "trusted"
                 resolution,
                 SandboxPolicyResolution {
                     policy: SandboxPolicy::WorkspaceWrite {
-                        writable_roots: vec![writable_root],
+                        writable_roots: vec![writable_root.into()],
                         network_access: false,
                         exclude_tmpdir_env_var: true,
                         exclude_slash_tmp: true,
@@ -1833,14 +1835,15 @@ trust_level = "trusted"
         } else {
             match config.sandbox_policy.get() {
                 SandboxPolicy::WorkspaceWrite { writable_roots, .. } => {
+                    let expected_backend_path: std::path::PathBuf = expected_backend.into();
                     assert_eq!(
                         writable_roots
                             .iter()
-                            .filter(|root| **root == expected_backend)
+                            .filter(|root| **root == expected_backend_path)
                             .count(),
                         1,
                         "expected single writable root entry for {}",
-                        expected_backend.display()
+                        expected_backend_path.display()
                     );
                 }
                 other => panic!("expected workspace-write policy, got {other:?}"),

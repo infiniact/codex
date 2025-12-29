@@ -1,7 +1,6 @@
 #![cfg(unix)]
 use codex_core::protocol::SandboxPolicy;
 use codex_core::spawn::StdioPolicy;
-use codex_utils_absolute_path::AbsolutePathBuf;
 use std::collections::HashMap;
 use std::future::Future;
 use std::io;
@@ -60,14 +59,14 @@ async fn spawn_command_under_sandbox(
 async fn python_multiprocessing_lock_works_under_sandbox() {
     core_test_support::skip_if_sandbox!();
     #[cfg(target_os = "macos")]
-    let writable_roots = Vec::<AbsolutePathBuf>::new();
+    let writable_roots = Vec::<PathBuf>::new();
 
     // From https://man7.org/linux/man-pages/man7/sem_overview.7.html
     //
     // > On Linux, named semaphores are created in a virtual filesystem,
     // > normally mounted under /dev/shm.
     #[cfg(target_os = "linux")]
-    let writable_roots: Vec<AbsolutePathBuf> = vec!["/dev/shm".try_into().unwrap()];
+    let writable_roots: Vec<PathBuf> = vec!["/dev/shm".into()];
 
     let policy = SandboxPolicy::WorkspaceWrite {
         writable_roots,

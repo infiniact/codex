@@ -59,7 +59,7 @@ impl EnvironmentContext {
                     if writable_roots.is_empty() {
                         None
                     } else {
-                        Some(writable_roots)
+                        Some(writable_roots.into_iter().filter_map(|p| AbsolutePathBuf::try_from(p).ok()).collect())
                     }
                 }
                 _ => None,
@@ -202,7 +202,7 @@ mod tests {
         SandboxPolicy::WorkspaceWrite {
             writable_roots: writable_roots
                 .into_iter()
-                .map(|s| AbsolutePathBuf::try_from(s).unwrap())
+                .map(|s| AbsolutePathBuf::try_from(s).unwrap().into())
                 .collect(),
             network_access,
             exclude_tmpdir_env_var: false,

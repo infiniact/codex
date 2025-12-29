@@ -718,6 +718,7 @@ async fn exec_approval_emits_proposed_command_and_decision_history() {
         reason: Some(
             "this is a test reason such as one that would be produced by the model".into(),
         ),
+        risk: None,
         proposed_execpolicy_amendment: None,
         parsed_cmd: vec![],
     };
@@ -762,6 +763,7 @@ async fn exec_approval_decision_truncates_multiline_and_long_commands() {
         reason: Some(
             "this is a test reason such as one that would be produced by the model".into(),
         ),
+        risk: None,
         proposed_execpolicy_amendment: None,
         parsed_cmd: vec![],
     };
@@ -812,6 +814,7 @@ async fn exec_approval_decision_truncates_multiline_and_long_commands() {
         command: vec!["bash".into(), "-lc".into(), long],
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         reason: None,
+        risk: None,
         proposed_execpolicy_amendment: None,
         parsed_cmd: vec![],
     };
@@ -1755,7 +1758,7 @@ async fn preset_matching_ignores_extra_writable_roots() {
         .find(|p| p.id == "auto")
         .expect("auto preset exists");
     let current_sandbox = SandboxPolicy::WorkspaceWrite {
-        writable_roots: vec![AbsolutePathBuf::try_from("C:\\extra").unwrap()],
+        writable_roots: vec![AbsolutePathBuf::try_from("C:\\extra").unwrap().into()],
         network_access: false,
         exclude_tmpdir_env_var: false,
         exclude_slash_tmp: false,
@@ -2047,6 +2050,7 @@ async fn approval_modal_exec_snapshot() {
         reason: Some(
             "this is a test reason such as one that would be produced by the model".into(),
         ),
+        risk: None,
         proposed_execpolicy_amendment: Some(ExecPolicyAmendment::new(vec![
             "echo".into(),
             "hello".into(),
@@ -2098,6 +2102,7 @@ async fn approval_modal_exec_without_reason_snapshot() {
         command: vec!["bash".into(), "-lc".into(), "echo hello world".into()],
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         reason: None,
+        risk: None,
         proposed_execpolicy_amendment: Some(ExecPolicyAmendment::new(vec![
             "echo".into(),
             "hello".into(),
@@ -2316,6 +2321,7 @@ async fn status_widget_and_approval_modal_snapshot() {
         reason: Some(
             "this is a test reason such as one that would be produced by the model".into(),
         ),
+        risk: None,
         proposed_execpolicy_amendment: Some(ExecPolicyAmendment::new(vec![
             "echo".into(),
             "hello world".into(),
@@ -2635,7 +2641,7 @@ async fn apply_patch_approval_sends_op_with_submission_id() {
     // Expect a CodexOp with PatchApproval carrying the submission id, not call id
     let mut found = false;
     while let Ok(app_ev) = rx.try_recv() {
-        if let AppEvent::CodexOp(Op::PatchApproval { id, decision }) = app_ev {
+        if let AppEvent::CodexOp(Op::PatchApproval { id, decision, .. }) = app_ev {
             assert_eq!(id, "sub-123");
             assert_matches!(decision, codex_core::protocol::ReviewDecision::Approved);
             found = true;
@@ -2683,7 +2689,7 @@ async fn apply_patch_full_flow_integration_like() {
         .try_recv()
         .expect("expected op forwarded to codex channel");
     match forwarded {
-        Op::PatchApproval { id, decision } => {
+        Op::PatchApproval { id, decision, .. } => {
             assert_eq!(id, "sub-xyz");
             assert_matches!(decision, codex_core::protocol::ReviewDecision::Approved);
         }

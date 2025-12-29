@@ -280,12 +280,21 @@ impl UnifiedExecSessionManager {
                 (script.to_string(), String::new())
             } else {
                 // 不是 shell 包装形式，使用原始命令格式化
-                (format_command_for_execution(&request.command), String::new())
+                (
+                    format_command_for_execution(&request.command),
+                    String::new(),
+                )
             }
         } else {
             // 本地执行：使用智能格式化处理 bash -c 等命令
             let command_str = format_command_for_execution(&request.command);
-            let shell = context.session.services.user_shell.shell_path.to_string_lossy().to_string();
+            let shell = context
+                .session
+                .services
+                .user_shell
+                .shell_path
+                .to_string_lossy()
+                .to_string();
             (command_str, shell)
         };
 
@@ -297,7 +306,7 @@ impl UnifiedExecSessionManager {
                 false, // login
                 true,  // display_in_panel
                 connection_id.as_deref(),
-                None,  // stdin
+                None, // stdin
             )
             .await
             .map_err(|e| UnifiedExecError::create_session(format!("PTY bridge error: {e}")))?;
@@ -597,18 +606,15 @@ impl UnifiedExecSessionManager {
         let features = context.session.features();
         let mut orchestrator = ToolOrchestrator::new();
         let mut runtime = UnifiedExecRuntime::new(self);
-        let exec_approval_requirement = context
-            .session
-            .services
-            .exec_policy
-            .create_exec_approval_requirement_for_command(
+        let exec_approval_requirement =
+            crate::exec_policy::create_exec_approval_requirement_for_command(
+                &context.turn.exec_policy,
                 &features,
                 command,
                 context.turn.approval_policy,
                 &context.turn.sandbox_policy,
                 sandbox_permissions,
-            )
-            .await;
+            );
         let req = UnifiedExecToolRequest::new(
             command.to_vec(),
             cwd,

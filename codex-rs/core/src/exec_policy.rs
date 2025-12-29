@@ -1,3 +1,6 @@
+// Allow dead code for iaterm branch features not yet integrated
+#![allow(dead_code)]
+
 use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
@@ -194,7 +197,7 @@ impl Default for ExecPolicyManager {
     }
 }
 
-async fn load_exec_policy_for_features(
+pub(crate) async fn load_exec_policy_for_features(
     features: &Features,
     config_stack: &ConfigLayerStack,
 ) -> Result<Policy, ExecPolicyError> {
@@ -202,6 +205,65 @@ async fn load_exec_policy_for_features(
         Ok(Policy::empty())
     } else {
         load_exec_policy(config_stack).await
+    }
+}
+
+/// Append an exec policy amendment and update the policy.
+/// This is a stub implementation that always succeeds.
+pub(crate) async fn append_execpolicy_amendment_and_update(
+    _codex_home: &std::path::Path,
+    _current_policy: &Policy,
+    _command: &[String],
+) -> Result<(), ExecPolicyUpdateError> {
+    // TODO: Implement the actual logic for appending exec policy amendments
+    tracing::warn!(
+        "append_execpolicy_amendment_and_update is not yet implemented"
+    );
+    Ok(())
+}
+
+/// Creates an exec approval requirement for a given command based on policy.
+///
+/// This is a stub implementation that delegates to the default sandbox approval logic.
+pub fn create_exec_approval_requirement_for_command(
+    _exec_policy: &std::sync::Arc<tokio::sync::RwLock<Policy>>,
+    features: &crate::features::Features,
+    _command: &[String],
+    approval_policy: codex_protocol::protocol::AskForApproval,
+    sandbox_policy: &codex_protocol::protocol::SandboxPolicy,
+    sandbox_permissions: codex_protocol::models::SandboxPermissions,
+) -> crate::tools::sandboxing::ExecApprovalRequirement {
+    use crate::tools::sandboxing::ExecApprovalRequirement;
+    use codex_protocol::protocol::AskForApproval;
+
+    // If exec policy feature is disabled, use default sandbox approval logic
+    if !features.enabled(crate::features::Feature::ExecPolicy) {
+        return crate::tools::sandboxing::default_exec_approval_requirement(
+            approval_policy,
+            sandbox_policy,
+        );
+    }
+
+    // Check if command needs escalated permissions
+    let needs_escalation = sandbox_permissions == codex_protocol::models::SandboxPermissions::RequireEscalated;
+
+    // Determine approval requirement based on policy
+    match (approval_policy, needs_escalation) {
+        // Always approve if policy says never ask
+        (AskForApproval::Never, _) => ExecApprovalRequirement::Skip {
+            bypass_sandbox: false,
+            proposed_execpolicy_amendment: None,
+        },
+        // For escalated commands, always require approval unless policy says never
+        (_, true) => ExecApprovalRequirement::NeedsApproval {
+            reason: Some("Command requires escalated permissions".to_string()),
+            proposed_execpolicy_amendment: None,
+        },
+        // Otherwise use default logic
+        _ => crate::tools::sandboxing::default_exec_approval_requirement(
+            approval_policy,
+            sandbox_policy,
+        ),
     }
 }
 

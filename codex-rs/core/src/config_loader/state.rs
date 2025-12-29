@@ -38,14 +38,16 @@ impl ConfigLayerEntry {
 
     pub fn metadata(&self) -> ConfigLayerMetadata {
         ConfigLayerMetadata {
-            name: self.name.clone(),
+            name: self.name.to_name(),
+            source: self.name.to_source_string(),
             version: self.version.clone(),
         }
     }
 
     pub fn as_layer(&self) -> ConfigLayer {
         ConfigLayer {
-            name: self.name.clone(),
+            name: self.name.to_name(),
+            source: self.name.to_source_string(),
             version: self.version.clone(),
             config: serde_json::to_value(&self.config).unwrap_or(JsonValue::Null),
         }

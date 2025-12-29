@@ -202,6 +202,7 @@ impl ToolRouter {
                             command: exec.command.join(" "),
                             workdir: exec.working_directory,
                             timeout_ms: exec.timeout_ms,
+                            with_escalated_permissions: None,
                             sandbox_permissions: Some(SandboxPermissions::UseDefault),
                             justification: None,
                             stdin: None,

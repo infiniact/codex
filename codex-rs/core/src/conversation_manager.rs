@@ -8,11 +8,12 @@ use crate::codex_conversation::CodexConversation;
 use crate::config::Config;
 use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
-use crate::openai_models::models_manager::ModelsManager;
+use crate::models_manager::manager::ModelsManager;
 use crate::protocol::Event;
 use crate::protocol::EventMsg;
 use crate::protocol::SessionConfiguredEvent;
 use crate::rollout::RolloutRecorder;
+use crate::skills::manager::SkillsManager;
 use crate::unified_exec::PtyServiceBridge;
 use codex_protocol::ConversationId;
 use codex_protocol::items::TurnItem;
@@ -40,6 +41,7 @@ pub struct ConversationManager {
     conversations: Arc<RwLock<HashMap<ConversationId, Arc<CodexConversation>>>>,
     auth_manager: Arc<AuthManager>,
     models_manager: Arc<ModelsManager>,
+    skills_manager: Arc<SkillsManager>,
     session_source: SessionSource,
     /// 可选的 PtyService 桥接器，用于统一的命令执行（支持运行时修改）
     pty_bridge: Arc<RwLock<Option<Arc<dyn PtyServiceBridge>>>>,
@@ -55,10 +57,12 @@ impl ConversationManager {
     /// - `auth_manager`: 认证管理器
     /// - `session_source`: 会话来源
     pub fn new(auth_manager: Arc<AuthManager>, session_source: SessionSource) -> Self {
+        let codex_home = Self::get_codex_home();
         Self {
             conversations: Arc::new(RwLock::new(HashMap::new())),
             auth_manager: auth_manager.clone(),
             models_manager: Arc::new(ModelsManager::new(auth_manager)),
+            skills_manager: Arc::new(SkillsManager::new(codex_home)),
             session_source,
             pty_bridge: Arc::new(RwLock::new(None)),
         }
@@ -97,10 +101,12 @@ impl ConversationManager {
         pty_bridge: Arc<dyn PtyServiceBridge>,
     ) -> Self {
         let models_manager = Arc::new(ModelsManager::new(auth_manager.clone()));
+        let codex_home = Self::get_codex_home();
         Self {
             conversations: Arc::new(RwLock::new(HashMap::new())),
             auth_manager,
             models_manager,
+            skills_manager: Arc::new(SkillsManager::new(codex_home)),
             session_source,
             pty_bridge: Arc::new(RwLock::new(Some(pty_bridge))),
         }
@@ -114,6 +120,31 @@ impl ConversationManager {
             crate::AuthManager::from_auth_for_testing(auth),
             SessionSource::Exec,
         )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    /// Construct with models provider and home directory.
+    /// Used for integration tests to configure a specific model provider.
+    pub fn with_models_provider_and_home(
+        auth: CodexAuth,
+        _model_provider: crate::ModelProviderInfo,
+        _codex_home: PathBuf,
+    ) -> Self {
+        // For testing, just use the basic with_auth setup
+        // model_provider and codex_home are handled by Config at conversation creation time
+        Self::with_auth(auth)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    /// Construct with models provider.
+    /// Used for integration tests to configure a specific model provider.
+    pub fn with_models_provider(
+        auth: CodexAuth,
+        _model_provider: crate::ModelProviderInfo,
+    ) -> Self {
+        // For testing, just use the basic with_auth setup
+        // model_provider is handled by Config at conversation creation time
+        Self::with_auth(auth)
     }
 
     /// 设置 PtyService 桥接器（异步版本）
@@ -192,6 +223,31 @@ impl ConversationManager {
     ) -> Option<String> {
         crate::unified_exec::get_global_conversation_connection(&conversation_id.to_string()).await
     }
+
+    /// Get the codex home directory.
+    fn get_codex_home() -> PathBuf {
+        // Honor the `CODEX_HOME` environment variable when it is set
+        if let Ok(val) = std::env::var("CODEX_HOME")
+            && !val.is_empty()
+        {
+            if let Ok(path) = PathBuf::from(&val).canonicalize() {
+                return path;
+            }
+            // Fall back to using the value as-is if canonicalize fails
+            return PathBuf::from(val);
+        }
+
+        // Default to ~/.codex
+        dirs::home_dir()
+            .map(|p| p.join(".codex"))
+            .unwrap_or_else(|| PathBuf::from(".codex"))
+    }
+
+    /// Get the skills manager.
+    pub fn skills_manager(&self) -> Arc<SkillsManager> {
+        self.skills_manager.clone()
+    }
+
     pub fn session_source(&self) -> SessionSource {
         self.session_source.clone()
     }
@@ -366,8 +422,8 @@ impl ConversationManager {
         self.finalize_spawn(codex, conversation_id).await
     }
 
-    pub async fn list_models(&self) -> Vec<ModelPreset> {
-        self.models_manager.list_models().await
+    pub async fn list_models(&self, config: &Config) -> Vec<ModelPreset> {
+        self.models_manager.list_models(config).await
     }
 
     pub fn get_models_manager(&self) -> Arc<ModelsManager> {

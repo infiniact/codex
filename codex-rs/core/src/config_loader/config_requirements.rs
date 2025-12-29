@@ -254,7 +254,7 @@ mod tests {
             requirements
                 .sandbox_policy
                 .can_set(&SandboxPolicy::WorkspaceWrite {
-                    writable_roots: vec![AbsolutePathBuf::from_absolute_path(root)?],
+                    writable_roots: vec![AbsolutePathBuf::from_absolute_path(root)?.into()],
                     network_access: false,
                     exclude_tmpdir_env_var: false,
                     exclude_slash_tmp: false,

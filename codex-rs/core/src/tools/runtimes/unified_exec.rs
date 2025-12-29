@@ -124,6 +124,7 @@ impl Approvable<UnifiedExecRequest> for UnifiedExecRuntime<'_> {
                         command,
                         cwd,
                         reason,
+                        None, // risk assessment
                         req.exec_approval_requirement
                             .proposed_execpolicy_amendment()
                             .cloned(),

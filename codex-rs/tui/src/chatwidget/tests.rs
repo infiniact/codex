@@ -722,6 +722,7 @@ async fn exec_approval_emits_proposed_command_and_decision_history() {
         reason: Some(
             "this is a test reason such as one that would be produced by the model".into(),
         ),
+        risk: None,
         proposed_execpolicy_amendment: None,
         parsed_cmd: vec![],
     };
@@ -766,6 +767,7 @@ async fn exec_approval_decision_truncates_multiline_and_long_commands() {
         reason: Some(
             "this is a test reason such as one that would be produced by the model".into(),
         ),
+        risk: None,
         proposed_execpolicy_amendment: None,
         parsed_cmd: vec![],
     };
@@ -816,6 +818,7 @@ async fn exec_approval_decision_truncates_multiline_and_long_commands() {
         command: vec!["bash".into(), "-lc".into(), long],
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         reason: None,
+        risk: None,
         proposed_execpolicy_amendment: None,
         parsed_cmd: vec![],
     };
@@ -1985,7 +1988,7 @@ async fn preset_matching_ignores_extra_writable_roots() {
         .find(|p| p.id == "auto")
         .expect("auto preset exists");
     let current_sandbox = SandboxPolicy::WorkspaceWrite {
-        writable_roots: vec![AbsolutePathBuf::try_from("C:\\extra").unwrap()],
+        writable_roots: vec![AbsolutePathBuf::try_from("C:\\extra").unwrap().into()],
         network_access: false,
         exclude_tmpdir_env_var: false,
         exclude_slash_tmp: false,
@@ -2385,6 +2388,7 @@ async fn approval_modal_exec_snapshot() -> anyhow::Result<()> {
         reason: Some(
             "this is a test reason such as one that would be produced by the model".into(),
         ),
+        risk: None,
         proposed_execpolicy_amendment: Some(ExecPolicyAmendment::new(vec![
             "echo".into(),
             "hello".into(),
@@ -2438,6 +2442,7 @@ async fn approval_modal_exec_without_reason_snapshot() -> anyhow::Result<()> {
         command: vec!["bash".into(), "-lc".into(), "echo hello world".into()],
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         reason: None,
+        risk: None,
         proposed_execpolicy_amendment: Some(ExecPolicyAmendment::new(vec![
             "echo".into(),
             "hello".into(),
@@ -2660,6 +2665,7 @@ async fn status_widget_and_approval_modal_snapshot() {
         reason: Some(
             "this is a test reason such as one that would be produced by the model".into(),
         ),
+        risk: None,
         proposed_execpolicy_amendment: Some(ExecPolicyAmendment::new(vec![
             "echo".into(),
             "hello world".into(),

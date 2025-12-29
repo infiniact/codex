@@ -5,7 +5,9 @@ pub mod model;
 pub mod render;
 pub mod system;
 
+#[allow(unused_imports)]
 pub(crate) use injection::SkillInjections;
+#[allow(unused_imports)]
 pub(crate) use injection::build_skill_injections;
 pub use loader::load_skills;
 pub use manager::SkillsManager;

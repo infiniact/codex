@@ -188,7 +188,6 @@ impl ToolHandler for UnifiedExecHandler {
                 let command_for_intercept = get_command(&args, session.user_shell());
                 let ExecCommandArgs {
                     workdir,
-                    login,
                     yield_time_ms,
                     max_output_tokens,
                     with_escalated_permissions,
@@ -236,14 +235,8 @@ impl ToolHandler for UnifiedExecHandler {
                     &context.call_id,
                     None,
                 );
-                let command = if login.is_none() {
-                    context
-                        .session
-                        .user_shell()
-                        .wrap_command_with_snapshot(&command_for_intercept)
-                } else {
-                    command_for_intercept
-                };
+                // Use the command directly - shell snapshotting is an experimental feature
+                let command = command_for_intercept;
                 let emitter = ToolEmitter::unified_exec(
                     &command,
                     cwd.clone(),
@@ -260,7 +253,7 @@ impl ToolHandler for UnifiedExecHandler {
                             yield_time_ms,
                             max_output_tokens,
                             workdir,
-                            with_escalated_permissions,
+                            sandbox_permissions: with_escalated_permissions.unwrap_or(false).into(),
                             justification,
                         },
                         &context,

@@ -78,7 +78,6 @@ async fn responses_stream_includes_subagent_header_on_review() {
         Some(auth_mode),
         false,
         "test".to_string(),
-        session_source.clone(),
     );
 
     let client = ModelClient::new(
@@ -173,7 +172,6 @@ async fn responses_stream_includes_subagent_header_on_other() {
         Some(auth_mode),
         false,
         "test".to_string(),
-        session_source.clone(),
     );
 
     let client = ModelClient::new(
@@ -266,7 +264,6 @@ async fn responses_respects_model_family_overrides_from_config() {
         auth_mode,
         false,
         "test".to_string(),
-        session_source.clone(),
     );
 
     let client = ModelClient::new(

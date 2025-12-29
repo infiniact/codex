@@ -4,7 +4,7 @@ use codex_protocol::openai_models::ReasoningEffort;
 
 use crate::config::Config;
 use crate::config::types::ReasoningSummaryFormat;
-use crate::tools::handlers::apply_patch::ApplyPatchToolType;
+use codex_protocol::openai_models::ApplyPatchToolType;
 use crate::truncate::TruncationPolicy;
 use codex_protocol::openai_models::ConfigShellToolType;
 
@@ -84,13 +84,18 @@ pub struct ModelFamily {
 }
 
 impl ModelFamily {
+    /// Get the model slug.
+    pub fn get_model_slug(&self) -> &str {
+        &self.slug
+    }
+
     pub fn with_config_overrides(mut self, config: &Config) -> Self {
         if let Some(supports_reasoning_summaries) = config.model_supports_reasoning_summaries {
             self.supports_reasoning_summaries = supports_reasoning_summaries;
         }
-        if let Some(reasoning_summary_format) = config.model_reasoning_summary_format.as_ref() {
-            self.reasoning_summary_format = reasoning_summary_format.clone();
-        }
+        // Note: config.model_reasoning_summary is ReasoningSummary (Auto/Concise/Detailed/None)
+        // while self.reasoning_summary_format is ReasoningSummaryFormat (None/Experimental)
+        // These are different concepts so we don't map between them directly
         if let Some(context_window) = config.model_context_window {
             self.context_window = Some(context_window);
         }
@@ -346,9 +351,9 @@ fn derive_default_model_family(model: &str) -> ModelFamily {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codex_protocol::openai_models::ClientVersion;
     use codex_protocol::openai_models::ModelVisibility;
     use codex_protocol::openai_models::ReasoningEffortPreset;
+    use codex_protocol::openai_models::TruncationPolicyConfig;
 
     fn remote(slug: &str, effort: ReasoningEffort, shell: ConfigShellToolType) -> ModelInfo {
         ModelInfo {
@@ -362,11 +367,18 @@ mod tests {
             }],
             shell_type: shell,
             visibility: ModelVisibility::List,
-            minimal_client_version: ClientVersion(0, 1, 0),
             supported_in_api: true,
             priority: 1,
             upgrade: None,
             base_instructions: None,
+            supports_reasoning_summaries: false,
+            support_verbosity: false,
+            default_verbosity: None,
+            apply_patch_tool_type: None,
+            truncation_policy: TruncationPolicyConfig::bytes(10_000),
+            supports_parallel_tool_calls: false,
+            context_window: None,
+            experimental_supported_tools: vec![],
         }
     }
 

@@ -197,6 +197,15 @@ pub enum Op {
     /// Request the list of available custom prompts.
     ListCustomPrompts,
 
+    /// Request the list of skills.
+    ListSkills {
+        /// Optional list of directories to search for skills.
+        /// If empty, uses the default directories.
+        cwds: Vec<std::path::PathBuf>,
+        /// Whether to force reload skills from disk.
+        force_reload: bool,
+    },
+
     /// Request the agent to summarize the current conversation context.
     /// The agent will use its existing context (either conversation history or previous response id)
     /// to generate a summary which will be returned as an AgentMessage event.
@@ -304,6 +313,25 @@ pub enum SandboxPolicy {
         #[serde(default)]
         exclude_slash_tmp: bool,
     },
+
+    /// Sandboxing is handled externally (e.g., by a container or VM).
+    /// The Codex agent itself doesn't apply any sandboxing restrictions.
+    #[serde(rename = "external-sandbox")]
+    ExternalSandbox {
+        /// Network access setting for the external sandbox environment.
+        network_access: NetworkAccess,
+    },
+}
+
+/// Determines network access restrictions in a sandbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display, JsonSchema, TS)]
+#[strum(serialize_all = "kebab-case")]
+#[serde(rename_all = "kebab-case")]
+pub enum NetworkAccess {
+    /// Network access is fully enabled.
+    Enabled,
+    /// Network access is restricted/disabled.
+    Restricted,
 }
 
 /// A writable root path accompanied by a list of subpaths that should remain
@@ -373,6 +401,7 @@ impl SandboxPolicy {
             SandboxPolicy::DangerFullAccess => true,
             SandboxPolicy::ReadOnly => false,
             SandboxPolicy::WorkspaceWrite { .. } => false,
+            SandboxPolicy::ExternalSandbox { .. } => true,
         }
     }
 
@@ -381,6 +410,7 @@ impl SandboxPolicy {
             SandboxPolicy::DangerFullAccess => true,
             SandboxPolicy::ReadOnly => false,
             SandboxPolicy::WorkspaceWrite { network_access, .. } => *network_access,
+            SandboxPolicy::ExternalSandbox { network_access } => *network_access == NetworkAccess::Enabled,
         }
     }
 
@@ -391,6 +421,7 @@ impl SandboxPolicy {
         match self {
             SandboxPolicy::DangerFullAccess => Vec::new(),
             SandboxPolicy::ReadOnly => Vec::new(),
+            SandboxPolicy::ExternalSandbox { .. } => Vec::new(),
             SandboxPolicy::WorkspaceWrite {
                 writable_roots,
                 exclude_tmpdir_env_var,
@@ -596,6 +627,12 @@ pub enum EventMsg {
     AgentMessageContentDelta(AgentMessageContentDeltaEvent),
     ReasoningContentDelta(ReasoningContentDeltaEvent),
     ReasoningRawContentDelta(ReasoningRawContentDeltaEvent),
+
+    /// Response to ListSkills operation.
+    ListSkillsResponse(ListSkillsResponseEvent),
+
+    /// Notification that skills have been updated and should be reloaded.
+    SkillsUpdateAvailable,
 }
 
 /// Codex errors that we expose to clients.
@@ -1248,6 +1285,13 @@ impl From<CompactedItem> for ResponseItem {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum TruncationPolicy {
+    Bytes(usize),
+    Tokens(usize),
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, TS)]
 pub struct TurnContextItem {
     pub cwd: PathBuf,
@@ -1257,6 +1301,16 @@ pub struct TurnContextItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<ReasoningEffortConfig>,
     pub summary: ReasoningSummaryConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub developer_instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_output_json_schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncation_policy: Option<TruncationPolicy>,
 }
 
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]
@@ -1516,6 +1570,9 @@ pub struct StreamErrorEvent {
     pub message: String,
     #[serde(default)]
     pub codex_error_info: Option<CodexErrorInfo>,
+    /// Optional additional details about the error.
+    #[serde(default)]
+    pub additional_details: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
@@ -1580,6 +1637,13 @@ pub struct McpListToolsResponseEvent {
     pub resource_templates: std::collections::HashMap<String, Vec<McpResourceTemplate>>,
     /// Authentication status for each configured MCP server.
     pub auth_statuses: std::collections::HashMap<String, McpAuthStatus>,
+}
+
+/// Response to ListSkills operation.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct ListSkillsResponseEvent {
+    /// List of skill entries grouped by working directory.
+    pub skills: Vec<SkillsListEntry>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
@@ -1747,6 +1811,40 @@ pub enum TurnAbortReason {
 /// 默认 is_user_turn 为 true（向后兼容）
 fn default_is_user_turn() -> bool {
     true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum SkillScope {
+    User,
+    Repo,
+    System,
+    Admin,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct SkillMetadata {
+    pub name: String,
+    pub description: String,
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_description: Option<String>,
+    pub path: PathBuf,
+    pub scope: SkillScope,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct SkillErrorInfo {
+    pub path: PathBuf,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct SkillsListEntry {
+    pub cwd: PathBuf,
+    pub skills: Vec<SkillMetadata>,
+    pub errors: Vec<SkillErrorInfo>,
 }
 
 #[cfg(test)]

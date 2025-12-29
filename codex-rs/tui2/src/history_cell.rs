@@ -1692,6 +1692,8 @@ mod tests {
             tool_timeout_sec: None,
             enabled_tools: None,
             disabled_tools: None,
+            max_calls_per_tool: None,
+            max_total_calls_per_turn: None,
         };
         config.mcp_servers.insert("docs".to_string(), stdio_config);
 
@@ -1711,6 +1713,8 @@ mod tests {
             tool_timeout_sec: None,
             enabled_tools: None,
             disabled_tools: None,
+            max_calls_per_tool: None,
+            max_total_calls_per_turn: None,
         };
         config.mcp_servers.insert("http".to_string(), http_config);
 

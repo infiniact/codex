@@ -119,6 +119,9 @@ impl KeyboardHandler for AuthModeWidget {
                         AuthMode::ApiKey => {
                             self.disallow_api_login();
                         }
+                        AuthMode::UserAccessToken => {
+                            // UserAccessToken mode is not supported in TUI2 onboarding
+                        }
                     },
                     SignInState::ChatGptSuccessMessage => {
                         *self.sign_in_state.write().unwrap() = SignInState::ChatGptSuccess;

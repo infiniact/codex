@@ -123,7 +123,7 @@ async fn run_compact_task_inner(
         base_instructions: turn_context.base_instructions.clone(),
         user_instructions: turn_context.user_instructions.clone(),
         developer_instructions: turn_context.developer_instructions.clone(),
-        final_output_json_schema: turn_context.final_output_json_schema.clone(),
+        final_output_json_schema: turn_context.final_output_json_schema.as_ref().and_then(|v| serde_json::to_string(v).ok()),
         truncation_policy: Some(turn_context.truncation_policy.into()),
     });
     sess.persist_rollout_items(&[rollout_item]).await;

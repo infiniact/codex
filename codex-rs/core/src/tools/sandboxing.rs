@@ -86,6 +86,7 @@ pub(crate) struct ApprovalCtx<'a> {
 
 // Specifies what tool orchestrator should do with a given tool call.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) enum ExecApprovalRequirement {
     /// No approval required for this tool call.
     Skip {
@@ -255,6 +256,20 @@ impl<'a> SandboxAttempt<'a> {
             self.codex_linux_sandbox_exe,
         )
     }
+}
+
+/// Data needed to retry a command in a different sandbox context.
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub(crate) struct SandboxRetryData {
+    pub command: Vec<String>,
+    pub cwd: std::path::PathBuf,
+}
+
+/// Trait for types that can provide sandbox retry data.
+#[allow(dead_code)]
+pub(crate) trait ProvidesSandboxRetryData {
+    fn sandbox_retry_data(&self) -> Option<SandboxRetryData>;
 }
 
 #[cfg(test)]

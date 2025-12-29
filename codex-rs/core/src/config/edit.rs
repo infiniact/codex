@@ -1216,6 +1216,8 @@ foo = { command = "cmd" }
                 tool_timeout_sec: None,
                 enabled_tools: None,
                 disabled_tools: None,
+                max_calls_per_tool: None,
+                max_total_calls_per_turn: None,
             },
         );
 
@@ -1259,6 +1261,8 @@ foo = { command = "cmd" } # keep me
                 tool_timeout_sec: None,
                 enabled_tools: None,
                 disabled_tools: None,
+                max_calls_per_tool: None,
+                max_total_calls_per_turn: None,
             },
         );
 
@@ -1301,6 +1305,8 @@ foo = { command = "cmd", args = ["--flag"] } # keep me
                 tool_timeout_sec: None,
                 enabled_tools: None,
                 disabled_tools: None,
+                max_calls_per_tool: None,
+                max_total_calls_per_turn: None,
             },
         );
 
@@ -1344,6 +1350,8 @@ foo = { command = "cmd" }
                 tool_timeout_sec: None,
                 enabled_tools: None,
                 disabled_tools: None,
+                max_calls_per_tool: None,
+                max_total_calls_per_turn: None,
             },
         );
 

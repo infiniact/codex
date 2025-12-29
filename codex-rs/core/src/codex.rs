@@ -14,8 +14,8 @@ use crate::compact_remote::run_inline_remote_auto_compact_task;
 use crate::exec_policy::load_exec_policy_for_features;
 use crate::features::Feature;
 use crate::features::Features;
-use crate::openai_models::model_family::ModelFamily;
-use crate::openai_models::models_manager::ModelsManager;
+use crate::models_manager::model_family::ModelFamily;
+use crate::models_manager::manager::ModelsManager;
 use crate::parse_command::parse_command;
 use crate::parse_turn_item;
 use crate::stream_events_utils::HandleOutputCtx;
@@ -131,7 +131,7 @@ use crate::user_notification::UserNotification;
 use crate::util::backoff;
 use codex_async_utils::OrCancelExt;
 use codex_execpolicy::Policy as ExecPolicy;
-use codex_otel::otel_event_manager::OtelEventManager;
+use codex_otel::otel_manager::OtelEventManager;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseInputItem;
@@ -216,9 +216,9 @@ impl Codex {
         let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
         let (tx_event, rx_event) = async_channel::unbounded();
 
-        let user_instructions = get_user_instructions(&config).await;
+        let user_instructions = get_user_instructions(&config, None).await;
 
-        let exec_policy = load_exec_policy_for_features(&config.features, &config.codex_home)
+        let exec_policy = load_exec_policy_for_features(&config.features, &config.config_layer_stack)
             .await
             .map_err(|err| CodexErr::Fatal(format!("failed to load execpolicy: {err}")))?;
         let exec_policy = Arc::new(RwLock::new(exec_policy));
@@ -227,15 +227,15 @@ impl Codex {
 
         let session_configuration = SessionConfiguration {
             provider: config.model_provider.clone(),
-            model: config.model.clone(),
+            model: config.model.clone().unwrap_or_default(),
             model_reasoning_effort: config.model_reasoning_effort,
             model_reasoning_summary: config.model_reasoning_summary,
             developer_instructions: config.developer_instructions.clone(),
             user_instructions,
             base_instructions: config.base_instructions.clone(),
             compact_prompt: config.compact_prompt.clone(),
-            approval_policy: config.approval_policy,
-            sandbox_policy: config.sandbox_policy.clone(),
+            approval_policy: *config.approval_policy,
+            sandbox_policy: (*config.sandbox_policy).clone(),
             cwd: config.cwd.clone(),
             original_config_do_not_use: Arc::clone(&config),
             exec_policy,
@@ -470,7 +470,7 @@ impl Session {
     fn build_per_turn_config(session_configuration: &SessionConfiguration) -> Config {
         let config = session_configuration.original_config_do_not_use.clone();
         let mut per_turn_config = (*config).clone();
-        per_turn_config.model = session_configuration.model.clone();
+        per_turn_config.model = Some(session_configuration.model.clone());
         per_turn_config.model_reasoning_effort = session_configuration.model_reasoning_effort;
         per_turn_config.model_reasoning_summary = session_configuration.model_reasoning_summary;
         per_turn_config.features = config.features.clone();
@@ -618,12 +618,12 @@ impl Session {
         }
 
         let model_family = models_manager
-            .construct_model_family(&config.model, &config)
+            .construct_model_family(config.model.as_deref().unwrap_or_default(), &config)
             .await;
         // todo(aibrahim): why are we passing model here while it can change?
         let otel_event_manager = OtelEventManager::new(
             conversation_id,
-            config.model.as_str(),
+            config.model.as_deref().unwrap_or_default(),
             model_family.slug.as_str(),
             auth_manager.auth().and_then(|a| a.get_account_id()),
             auth_manager.auth().and_then(|a| a.get_account_email()),
@@ -638,8 +638,8 @@ impl Session {
             config.model_reasoning_summary,
             config.model_context_window,
             config.model_auto_compact_token_limit,
-            config.approval_policy,
-            config.sandbox_policy.clone(),
+            *config.approval_policy,
+            (*config.sandbox_policy).clone(),
             config.mcp_servers.keys().map(String::as_str).collect(),
             config.active_profile.clone(),
         );
@@ -703,6 +703,13 @@ impl Session {
         for event in events {
             sess.send_event_raw(event).await;
         }
+
+        let sandbox_state = SandboxState {
+            sandbox_policy: session_configuration.sandbox_policy.clone(),
+            codex_linux_sandbox_exe: config.codex_linux_sandbox_exe.clone(),
+            sandbox_cwd: session_configuration.cwd.clone(),
+        };
+
         sess.services
             .mcp_connection_manager
             .write()
@@ -713,14 +720,10 @@ impl Session {
                 auth_statuses.clone(),
                 tx_event.clone(),
                 sess.services.mcp_startup_cancellation_token.clone(),
+                sandbox_state.clone(),
             )
             .await;
 
-        let sandbox_state = SandboxState {
-            sandbox_policy: session_configuration.sandbox_policy.clone(),
-            codex_linux_sandbox_exe: config.codex_linux_sandbox_exe.clone(),
-            sandbox_cwd: session_configuration.cwd.clone(),
-        };
         if let Err(e) = sess
             .services
             .mcp_connection_manager
@@ -885,7 +888,7 @@ impl Session {
         let model_family = self
             .services
             .models_manager
-            .construct_model_family(&per_turn_config.model, &per_turn_config)
+            .construct_model_family(per_turn_config.model.as_deref().unwrap_or_default(), &per_turn_config)
             .await;
         let mut turn_context: TurnContext = Self::make_turn_context(
             Some(Arc::clone(&self.services.auth_manager)),
@@ -980,6 +983,7 @@ impl Session {
         .await;
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn assess_sandbox_command(
         &self,
         turn_context: &TurnContext,
@@ -1032,9 +1036,10 @@ impl Session {
             return Err(ExecPolicyUpdateError::FeatureDisabled);
         }
 
+        let policy = current_policy.read().await;
         crate::exec_policy::append_execpolicy_amendment_and_update(
             &codex_home,
-            &current_policy,
+            &policy,
             &amendment.command,
         )
         .await?;
@@ -1210,7 +1215,7 @@ impl Session {
                     ResponseItem::Reasoning { id, .. } => format!("Reasoning(id={id})"),
                     ResponseItem::WebSearchCall { id, .. } => format!("WebSearchCall(id={id:?})"),
                     ResponseItem::GhostSnapshot { .. } => "GhostSnapshot".to_string(),
-                    ResponseItem::CompactionSummary { .. } => "CompactionSummary".to_string(),
+                    ResponseItem::Compaction { .. } => "Compaction".to_string(),
                     ResponseItem::Other => "Other".to_string(),
                 };
                 tracing::info!("  📝 [record {i}]: {summary}");
@@ -1493,6 +1498,7 @@ impl Session {
         let event = EventMsg::StreamError(StreamErrorEvent {
             message: message.into(),
             codex_error_info: Some(codex_error_info),
+            additional_details: None,
         });
         self.send_event(turn_context, event).await;
     }
@@ -1658,7 +1664,7 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
         && let Err(err) = sess
             .services
             .models_manager
-            .refresh_available_models(&config.model_provider)
+            .refresh_available_models(&config)
             .await
     {
         error!("failed to refresh available models: {err}");
@@ -2261,7 +2267,7 @@ async fn spawn_review_thread(
 
     // Build per‑turn client with the requested model/family.
     let mut per_turn_config = (*config).clone();
-    per_turn_config.model = model.clone();
+    per_turn_config.model = Some(model.clone());
     per_turn_config.model_reasoning_effort = Some(ReasoningEffortConfig::Low);
     per_turn_config.model_reasoning_summary = ReasoningSummaryConfig::Detailed;
     per_turn_config.features = review_features.clone();
@@ -2270,7 +2276,7 @@ async fn spawn_review_thread(
         .client
         .get_otel_event_manager()
         .with_model(
-            per_turn_config.model.as_str(),
+            per_turn_config.model.as_deref().unwrap_or_default(),
             review_model_family.slug.as_str(),
         );
 
@@ -2377,7 +2383,7 @@ pub(crate) async fn run_task(
                 "Preemptive compact: current tokens ({}) >= 80% threshold ({}), at logical unit boundary",
                 current_tokens, preemptive_compact_threshold
             );
-            if should_use_remote_compact_task(&sess) {
+            if should_use_remote_compact_task(&sess, turn_context.client.provider()) {
                 run_inline_remote_auto_compact_task(sess.clone(), turn_context.clone()).await;
             } else {
                 run_inline_auto_compact_task(sess.clone(), turn_context.clone()).await;
@@ -2560,7 +2566,7 @@ pub(crate) async fn run_task(
 
                 // as long as compaction works well in getting us way below the token limit, we shouldn't worry about being in an infinite loop.
                 if token_limit_reached {
-                    if should_use_remote_compact_task(&sess) {
+                    if should_use_remote_compact_task(&sess, turn_context.client.provider()) {
                         run_inline_remote_auto_compact_task(sess.clone(), turn_context.clone())
                             .await;
                     } else {
@@ -2715,7 +2721,7 @@ pub(crate) async fn run_task(
                     .await;
 
                     // 执行 compact
-                    if should_use_remote_compact_task(&sess) {
+                    if should_use_remote_compact_task(&sess, turn_context.client.provider()) {
                         run_inline_remote_auto_compact_task(sess.clone(), turn_context.clone())
                             .await;
                     } else {
@@ -2924,6 +2930,11 @@ async fn try_run_turn(
         model: turn_context.client.get_model(),
         effort: turn_context.client.get_reasoning_effort(),
         summary: turn_context.client.get_reasoning_summary(),
+        base_instructions: None,
+        user_instructions: None,
+        developer_instructions: None,
+        final_output_json_schema: None,
+        truncation_policy: None,
     });
 
     sess.persist_rollout_items(&[rollout_item]).await;
@@ -3239,15 +3250,15 @@ mod tests {
         let config = Arc::new(config);
         let session_configuration = SessionConfiguration {
             provider: config.model_provider.clone(),
-            model: config.model.clone(),
+            model: config.model.clone().unwrap_or_default(),
             model_reasoning_effort: config.model_reasoning_effort,
             model_reasoning_summary: config.model_reasoning_summary,
             developer_instructions: config.developer_instructions.clone(),
             user_instructions: config.user_instructions.clone(),
             base_instructions: config.base_instructions.clone(),
             compact_prompt: config.compact_prompt.clone(),
-            approval_policy: config.approval_policy,
-            sandbox_policy: config.sandbox_policy.clone(),
+            approval_policy: *config.approval_policy,
+            sandbox_policy: (*config.sandbox_policy).clone(),
             cwd: config.cwd.clone(),
             original_config_do_not_use: Arc::clone(&config),
             exec_policy: Arc::new(RwLock::new(ExecPolicy::empty())),
@@ -3310,15 +3321,15 @@ mod tests {
         let config = Arc::new(config);
         let session_configuration = SessionConfiguration {
             provider: config.model_provider.clone(),
-            model: config.model.clone(),
+            model: config.model.clone().unwrap_or_default(),
             model_reasoning_effort: config.model_reasoning_effort,
             model_reasoning_summary: config.model_reasoning_summary,
             developer_instructions: config.developer_instructions.clone(),
             user_instructions: config.user_instructions.clone(),
             base_instructions: config.base_instructions.clone(),
             compact_prompt: config.compact_prompt.clone(),
-            approval_policy: config.approval_policy,
-            sandbox_policy: config.sandbox_policy.clone(),
+            approval_policy: *config.approval_policy,
+            sandbox_policy: (*config.sandbox_policy).clone(),
             cwd: config.cwd.clone(),
             original_config_do_not_use: Arc::clone(&config),
             exec_policy: Arc::new(RwLock::new(ExecPolicy::empty())),
@@ -3485,7 +3496,7 @@ mod tests {
     ) -> OtelEventManager {
         OtelEventManager::new(
             conversation_id,
-            config.model.as_str(),
+            config.model.as_deref().unwrap_or_default(),
             model_family.slug.as_str(),
             None,
             Some("test@test.com".to_string()),
@@ -3511,15 +3522,15 @@ mod tests {
         let models_manager = Arc::new(ModelsManager::new(auth_manager.clone()));
         let session_configuration = SessionConfiguration {
             provider: config.model_provider.clone(),
-            model: config.model.clone(),
+            model: config.model.clone().unwrap_or_default(),
             model_reasoning_effort: config.model_reasoning_effort,
             model_reasoning_summary: config.model_reasoning_summary,
             developer_instructions: config.developer_instructions.clone(),
             user_instructions: config.user_instructions.clone(),
             base_instructions: config.base_instructions.clone(),
             compact_prompt: config.compact_prompt.clone(),
-            approval_policy: config.approval_policy,
-            sandbox_policy: config.sandbox_policy.clone(),
+            approval_policy: *config.approval_policy,
+            sandbox_policy: (*config.sandbox_policy).clone(),
             cwd: config.cwd.clone(),
             original_config_do_not_use: Arc::clone(&config),
             exec_policy: Arc::new(RwLock::new(ExecPolicy::empty())),
@@ -3527,7 +3538,7 @@ mod tests {
         };
         let per_turn_config = Session::build_per_turn_config(&session_configuration);
         let model_family =
-            ModelsManager::construct_model_family_offline(&per_turn_config.model, &per_turn_config);
+            ModelsManager::construct_model_family_offline(per_turn_config.model.as_deref().unwrap_or_default(), &per_turn_config);
         let otel_event_manager =
             otel_event_manager(conversation_id, config.as_ref(), &model_family);
 
@@ -3595,15 +3606,15 @@ mod tests {
         let models_manager = Arc::new(ModelsManager::new(auth_manager.clone()));
         let session_configuration = SessionConfiguration {
             provider: config.model_provider.clone(),
-            model: config.model.clone(),
+            model: config.model.clone().unwrap_or_default(),
             model_reasoning_effort: config.model_reasoning_effort,
             model_reasoning_summary: config.model_reasoning_summary,
             developer_instructions: config.developer_instructions.clone(),
             user_instructions: config.user_instructions.clone(),
             base_instructions: config.base_instructions.clone(),
             compact_prompt: config.compact_prompt.clone(),
-            approval_policy: config.approval_policy,
-            sandbox_policy: config.sandbox_policy.clone(),
+            approval_policy: *config.approval_policy,
+            sandbox_policy: (*config.sandbox_policy).clone(),
             cwd: config.cwd.clone(),
             original_config_do_not_use: Arc::clone(&config),
             exec_policy: Arc::new(RwLock::new(ExecPolicy::empty())),
@@ -3611,7 +3622,7 @@ mod tests {
         };
         let per_turn_config = Session::build_per_turn_config(&session_configuration);
         let model_family =
-            ModelsManager::construct_model_family_offline(&per_turn_config.model, &per_turn_config);
+            ModelsManager::construct_model_family_offline(per_turn_config.model.as_deref().unwrap_or_default(), &per_turn_config);
         let otel_event_manager =
             otel_event_manager(conversation_id, config.as_ref(), &model_family);
 
@@ -3980,6 +3991,7 @@ mod tests {
         use crate::exec::ExecParams;
         use crate::protocol::AskForApproval;
         use crate::protocol::SandboxPolicy;
+        use crate::sandboxing::SandboxPermissions;
         use crate::turn_diff_tracker::TurnDiffTracker;
         use std::collections::HashMap;
 
@@ -4007,13 +4019,13 @@ mod tests {
             cwd: turn_context.cwd.clone(),
             expiration: timeout_ms.into(),
             env: HashMap::new(),
-            with_escalated_permissions: Some(true),
+            sandbox_permissions: SandboxPermissions::RequireEscalated,
             justification: Some("test".to_string()),
             arg0: None,
         };
 
         let params2 = ExecParams {
-            with_escalated_permissions: Some(false),
+            sandbox_permissions: SandboxPermissions::UseDefault,
             command: params.command.clone(),
             cwd: params.cwd.clone(),
             expiration: timeout_ms.into(),
@@ -4040,7 +4052,7 @@ mod tests {
                         "command": params.command.clone(),
                         "workdir": Some(turn_context.cwd.to_string_lossy().to_string()),
                         "timeout_ms": params.expiration.timeout_ms(),
-                        "with_escalated_permissions": params.with_escalated_permissions,
+                        "sandbox_permissions": params.sandbox_permissions,
                         "justification": params.justification.clone(),
                     })
                     .to_string(),
@@ -4077,7 +4089,7 @@ mod tests {
                         "command": params2.command.clone(),
                         "workdir": Some(turn_context.cwd.to_string_lossy().to_string()),
                         "timeout_ms": params2.expiration.timeout_ms(),
-                        "with_escalated_permissions": params2.with_escalated_permissions,
+                        "sandbox_permissions": params2.sandbox_permissions,
                         "justification": params2.justification.clone(),
                     })
                     .to_string(),

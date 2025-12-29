@@ -42,7 +42,7 @@ impl ToolOrchestrator {
     where
         T: ToolRuntime<Rq, Out>,
     {
-        let otel = turn_ctx.client.get_otel_manager();
+        let otel = turn_ctx.client.get_otel_event_manager();
         let otel_tn = &tool_ctx.tool_name;
         let otel_ci = &tool_ctx.call_id;
         let otel_user = codex_otel::otel_manager::ToolDecisionSource::User;

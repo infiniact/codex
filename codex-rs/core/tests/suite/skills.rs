@@ -82,6 +82,7 @@ async fn user_turn_includes_skill_instructions() -> Result<()> {
             model: session_model,
             effort: None,
             summary: codex_protocol::config_types::ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 

@@ -86,7 +86,6 @@ async fn run_stream_with_bytes(sse_body: &[u8]) -> Vec<ResponseEvent> {
         auth_mode,
         false,
         "test".to_string(),
-        SessionSource::Exec,
     );
 
     let client = ModelClient::new(

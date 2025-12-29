@@ -305,7 +305,7 @@ pub async fn process_sse(
                         format!("CustomToolCallOutput(call_id={call_id}, output={output_preview})")
                     }
                     ResponseItem::GhostSnapshot { .. } => "GhostSnapshot".to_string(),
-                    ResponseItem::CompactionSummary { .. } => "CompactionSummary".to_string(),
+                    ResponseItem::Compaction { .. } => "Compaction".to_string(),
                     ResponseItem::Other => "Other".to_string(),
                 };
                 debug!("📥 [process_sse] output_item.done: {}", item_summary);

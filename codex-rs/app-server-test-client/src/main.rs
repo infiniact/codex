@@ -757,6 +757,7 @@ impl CodexClient {
             item_id,
             reason,
             proposed_execpolicy_amendment,
+            risk,
         } = params;
 
         println!(
@@ -764,6 +765,9 @@ impl CodexClient {
         );
         if let Some(reason) = reason.as_deref() {
             println!("< reason: {reason}");
+        }
+        if let Some(risk) = risk.as_ref() {
+            println!("< risk: {risk:?}");
         }
         if let Some(execpolicy_amendment) = proposed_execpolicy_amendment.as_ref() {
             println!("< proposed execpolicy amendment: {execpolicy_amendment:?}");

@@ -8,9 +8,9 @@ use crate::config_loader::LoaderOverrides;
 use crate::config_loader::load_config_layers_state;
 use crate::config_loader::merge_toml_values;
 use crate::path_utils;
-use codex_app_server_protocol::Config as ApiConfig;
 use codex_app_server_protocol::ConfigBatchWriteParams;
 use codex_app_server_protocol::ConfigLayerMetadata;
+use codex_app_server_protocol::ConfigLayerName;
 use codex_app_server_protocol::ConfigLayerSource;
 use codex_app_server_protocol::ConfigReadParams;
 use codex_app_server_protocol::ConfigReadResponse;
@@ -142,8 +142,7 @@ impl ConfigService {
 
         let json_value = serde_json::to_value(&effective)
             .map_err(|err| ConfigServiceError::json("failed to serialize configuration", err))?;
-        let config: ApiConfig = serde_json::from_value(json_value)
-            .map_err(|err| ConfigServiceError::json("failed to deserialize configuration", err))?;
+        let config: JsonValue = json_value;
 
         Ok(ConfigReadResponse {
             config,
@@ -323,7 +322,7 @@ impl ConfigService {
                 })?
                 .version
                 .clone(),
-            file_path: provided_path,
+            file_path: provided_path.display().to_string(),
             overridden_metadata: overridden,
         })
     }
@@ -548,31 +547,12 @@ fn value_at_path<'a>(root: &'a TomlValue, segments: &[String]) -> Option<&'a Tom
     Some(current)
 }
 
-fn override_message(layer: &ConfigLayerSource) -> String {
+fn override_message(layer: &ConfigLayerName) -> String {
     match layer {
-        ConfigLayerSource::Mdm { domain, key: _ } => {
-            format!("Overridden by managed policy (MDM): {domain}")
-        }
-        ConfigLayerSource::System { file } => {
-            format!("Overridden by managed config (system): {}", file.display())
-        }
-        ConfigLayerSource::Project { dot_codex_folder } => format!(
-            "Overridden by project config: {}/{CONFIG_TOML_FILE}",
-            dot_codex_folder.display(),
-        ),
-        ConfigLayerSource::SessionFlags => "Overridden by session flags".to_string(),
-        ConfigLayerSource::User { file } => {
-            format!("Overridden by user config: {}", file.display())
-        }
-        ConfigLayerSource::LegacyManagedConfigTomlFromFile { file } => {
-            format!(
-                "Overridden by legacy managed_config.toml: {}",
-                file.display()
-            )
-        }
-        ConfigLayerSource::LegacyManagedConfigTomlFromMdm => {
-            "Overridden by legacy managed configuration from MDM".to_string()
-        }
+        ConfigLayerName::Mdm => "Overridden by managed policy (MDM)".to_string(),
+        ConfigLayerName::System => "Overridden by managed config (system)".to_string(),
+        ConfigLayerName::User => "Overridden by user config".to_string(),
+        ConfigLayerName::SessionFlags => "Overridden by session flags".to_string(),
     }
 }
 
@@ -637,7 +617,6 @@ fn find_effective_layer(
 mod tests {
     use super::*;
     use anyhow::Result;
-    use codex_app_server_protocol::AskForApproval;
     use codex_utils_absolute_path::AbsolutePathBuf;
     use pretty_assertions::assert_eq;
     use tempfile::tempdir;
@@ -742,11 +721,11 @@ remote_compaction = true
         let tmp = tempdir().expect("tempdir");
         let user_path = tmp.path().join(CONFIG_TOML_FILE);
         std::fs::write(&user_path, "model = \"user\"").unwrap();
-        let user_file = AbsolutePathBuf::try_from(user_path.clone()).expect("user file");
+        let _user_file = AbsolutePathBuf::try_from(user_path.clone()).expect("user file");
 
         let managed_path = tmp.path().join("managed_config.toml");
         std::fs::write(&managed_path, "approval_policy = \"never\"").unwrap();
-        let managed_file = AbsolutePathBuf::try_from(managed_path.clone()).expect("managed file");
+        let _managed_file = AbsolutePathBuf::try_from(managed_path.clone()).expect("managed file");
 
         let service = ConfigService::with_overrides(
             tmp.path().to_path_buf(),
@@ -765,7 +744,7 @@ remote_compaction = true
             .await
             .expect("response");
 
-        assert_eq!(response.config.approval_policy, Some(AskForApproval::Never));
+        assert_eq!(response.config["approval_policy"], serde_json::json!("never"));
 
         assert_eq!(
             response
@@ -773,44 +752,36 @@ remote_compaction = true
                 .get("approval_policy")
                 .expect("origin")
                 .name,
-            ConfigLayerSource::LegacyManagedConfigTomlFromFile {
-                file: managed_file.clone()
-            },
+            ConfigLayerName::System,
         );
         let layers = response.layers.expect("layers present");
         if cfg!(unix) {
-            let system_file = AbsolutePathBuf::from_absolute_path(
+            let _system_file = AbsolutePathBuf::from_absolute_path(
                 crate::config_loader::SYSTEM_CONFIG_TOML_FILE_UNIX,
             )
             .expect("system file");
             assert_eq!(layers.len(), 3, "expected three layers on unix");
             assert_eq!(
                 layers.first().unwrap().name,
-                ConfigLayerSource::LegacyManagedConfigTomlFromFile {
-                    file: managed_file.clone()
-                }
+                ConfigLayerName::System
             );
             assert_eq!(
                 layers.get(1).unwrap().name,
-                ConfigLayerSource::User {
-                    file: user_file.clone()
-                }
+                ConfigLayerName::User
             );
             assert_eq!(
                 layers.get(2).unwrap().name,
-                ConfigLayerSource::System { file: system_file }
+                ConfigLayerName::System
             );
         } else {
             assert_eq!(layers.len(), 2, "expected two layers");
             assert_eq!(
                 layers.first().unwrap().name,
-                ConfigLayerSource::LegacyManagedConfigTomlFromFile {
-                    file: managed_file.clone()
-                }
+                ConfigLayerName::System
             );
             assert_eq!(
                 layers.get(1).unwrap().name,
-                ConfigLayerSource::User { file: user_file }
+                ConfigLayerName::User
             );
         }
     }
@@ -826,7 +797,7 @@ remote_compaction = true
 
         let managed_path = tmp.path().join("managed_config.toml");
         std::fs::write(&managed_path, "approval_policy = \"never\"").unwrap();
-        let managed_file = AbsolutePathBuf::try_from(managed_path.clone()).expect("managed file");
+        let _managed_file = AbsolutePathBuf::try_from(managed_path.clone()).expect("managed file");
 
         let service = ConfigService::with_overrides(
             tmp.path().to_path_buf(),
@@ -856,8 +827,8 @@ remote_compaction = true
             .await
             .expect("read");
         assert_eq!(
-            read_after.config.approval_policy,
-            Some(AskForApproval::Never)
+            read_after.config["approval_policy"],
+            serde_json::json!("never")
         );
         assert_eq!(
             read_after
@@ -865,9 +836,7 @@ remote_compaction = true
                 .get("approval_policy")
                 .expect("origin")
                 .name,
-            ConfigLayerSource::LegacyManagedConfigTomlFromFile {
-                file: managed_file.clone()
-            }
+            ConfigLayerName::System
         );
         assert_eq!(result.status, WriteStatus::Ok);
         assert!(result.overridden_metadata.is_none());
@@ -966,11 +935,11 @@ remote_compaction = true
         let tmp = tempdir().expect("tempdir");
         let user_path = tmp.path().join(CONFIG_TOML_FILE);
         std::fs::write(&user_path, "model = \"user\"").unwrap();
-        let user_file = AbsolutePathBuf::try_from(user_path.clone()).expect("user file");
+        let _user_file = AbsolutePathBuf::try_from(user_path.clone()).expect("user file");
 
         let managed_path = tmp.path().join("managed_config.toml");
         std::fs::write(&managed_path, "model = \"system\"").unwrap();
-        let managed_file = AbsolutePathBuf::try_from(managed_path.clone()).expect("managed file");
+        let _managed_file = AbsolutePathBuf::try_from(managed_path.clone()).expect("managed file");
 
         let cli_overrides = vec![(
             "model".to_string(),
@@ -994,22 +963,20 @@ remote_compaction = true
             .await
             .expect("response");
 
-        assert_eq!(response.config.model.as_deref(), Some("system"));
+        assert_eq!(response.config["model"], serde_json::json!("system"));
         assert_eq!(
             response.origins.get("model").expect("origin").name,
-            ConfigLayerSource::LegacyManagedConfigTomlFromFile {
-                file: managed_file.clone()
-            },
+            ConfigLayerName::System,
         );
         let layers = response.layers.expect("layers");
         assert_eq!(
             layers.first().unwrap().name,
-            ConfigLayerSource::LegacyManagedConfigTomlFromFile { file: managed_file }
+            ConfigLayerName::System
         );
-        assert_eq!(layers.get(1).unwrap().name, ConfigLayerSource::SessionFlags);
+        assert_eq!(layers.get(1).unwrap().name, ConfigLayerName::SessionFlags);
         assert_eq!(
             layers.get(2).unwrap().name,
-            ConfigLayerSource::User { file: user_file }
+            ConfigLayerName::User
         );
     }
 
@@ -1020,7 +987,7 @@ remote_compaction = true
 
         let managed_path = tmp.path().join("managed_config.toml");
         std::fs::write(&managed_path, "approval_policy = \"never\"").unwrap();
-        let managed_file = AbsolutePathBuf::try_from(managed_path.clone()).expect("managed file");
+        let _managed_file = AbsolutePathBuf::try_from(managed_path.clone()).expect("managed file");
 
         let service = ConfigService::with_overrides(
             tmp.path().to_path_buf(),
@@ -1047,7 +1014,7 @@ remote_compaction = true
         let overridden = result.overridden_metadata.expect("overridden metadata");
         assert_eq!(
             overridden.overriding_layer.name,
-            ConfigLayerSource::LegacyManagedConfigTomlFromFile { file: managed_file }
+            ConfigLayerName::System
         );
         assert_eq!(overridden.effective_value, serde_json::json!("never"));
     }

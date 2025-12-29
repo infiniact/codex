@@ -85,7 +85,6 @@ async fn run_request(input: Vec<ResponseItem>) -> Value {
         Some(AuthMode::ApiKey),
         false,
         "test".to_string(),
-        SessionSource::Exec,
     );
 
     let client = ModelClient::new(

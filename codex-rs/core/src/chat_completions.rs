@@ -15,7 +15,7 @@ use crate::model_family::ModelFamily;
 use crate::tools::spec::create_tools_json_for_chat_completions_api;
 use crate::util::backoff;
 use bytes::Bytes;
-use codex_otel::otel_event_manager::OtelEventManager;
+use codex_otel::otel_manager::OtelEventManager;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ReasoningItemContent;
@@ -82,7 +82,7 @@ pub(crate) async fn stream_chat_completions(
             ResponseItem::CustomToolCallOutput { .. } => {}
             ResponseItem::WebSearchCall { .. } => {}
             ResponseItem::GhostSnapshot { .. } => {}
-            ResponseItem::CompactionSummary { .. } => {}
+            ResponseItem::Compaction { .. } => {}
         }
     }
 
@@ -366,7 +366,7 @@ pub(crate) async fn stream_chat_completions(
             ResponseItem::Reasoning { .. }
             | ResponseItem::WebSearchCall { .. }
             | ResponseItem::Other
-            | ResponseItem::CompactionSummary { .. } => {
+            | ResponseItem::Compaction { .. } => {
                 // Omit these items from the conversation history.
                 continue;
             }
