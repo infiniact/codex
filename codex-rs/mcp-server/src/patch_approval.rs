@@ -122,6 +122,7 @@ pub(crate) async fn on_patch_approval_response(
                 .submit(Op::PatchApproval {
                     id: event_id.clone(),
                     decision: ReviewDecision::Denied,
+                    custom_message: None,
                 })
                 .await
             {
@@ -142,6 +143,7 @@ pub(crate) async fn on_patch_approval_response(
         .submit(Op::PatchApproval {
             id: event_id,
             decision: response.decision,
+            custom_message: None,
         })
         .await
     {

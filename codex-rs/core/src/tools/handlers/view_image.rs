@@ -5,6 +5,7 @@ use tokio::fs;
 use crate::function_tool::FunctionCallError;
 use crate::protocol::EventMsg;
 use crate::protocol::ViewImageToolCallEvent;
+use crate::shell_utils::parse_json_with_recovery;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
@@ -43,7 +44,7 @@ impl ToolHandler for ViewImageHandler {
             }
         };
 
-        let args: ViewImageArgs = serde_json::from_str(&arguments).map_err(|e| {
+        let args: ViewImageArgs = parse_json_with_recovery(&arguments).map_err(|e| {
             FunctionCallError::RespondToModel(format!("failed to parse function arguments: {e:?}"))
         })?;
 

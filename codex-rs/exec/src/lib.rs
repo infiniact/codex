@@ -417,6 +417,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
                     effort: default_effort,
                     summary: default_summary,
                     final_output_json_schema: output_schema,
+                    is_user_turn: false, // CLI 工具不计入用户主动发送
                 })
                 .await?;
             info!("Sent prompt with event ID: {task_id}");

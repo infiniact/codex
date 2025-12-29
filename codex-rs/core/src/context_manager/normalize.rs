@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 
-use crate::util::error_or_panic;
+use tracing::warn;
 
 pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItem>) {
     // Collect synthetic outputs to insert immediately after their calls.
@@ -22,15 +22,17 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItem>) {
                 });
 
                 if !has_output {
-                    error_or_panic(format!(
-                        "Function call output is missing for call id: {call_id}"
-                    ));
+                    // 这是正常的恢复流程（例如 SSE 超时重试），不应该 panic
+                    // 只记录警告并插入占位符输出
+                    warn!(
+                        "Function call output is missing for call id: {call_id}, inserting placeholder"
+                    );
                     missing_outputs_to_insert.push((
                         idx,
                         ResponseItem::FunctionCallOutput {
                             call_id: call_id.clone(),
                             output: FunctionCallOutputPayload {
-                                content: "aborted".to_string(),
+                                content: "aborted (tool execution interrupted)".to_string(),
                                 ..Default::default()
                             },
                         },
@@ -46,14 +48,14 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItem>) {
                 });
 
                 if !has_output {
-                    error_or_panic(format!(
-                        "Custom tool call output is missing for call id: {call_id}"
-                    ));
+                    warn!(
+                        "Custom tool call output is missing for call id: {call_id}, inserting placeholder"
+                    );
                     missing_outputs_to_insert.push((
                         idx,
                         ResponseItem::CustomToolCallOutput {
                             call_id: call_id.clone(),
-                            output: "aborted".to_string(),
+                            output: "aborted (tool execution interrupted)".to_string(),
                         },
                     ));
                 }
@@ -69,15 +71,15 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItem>) {
                     });
 
                     if !has_output {
-                        error_or_panic(format!(
-                            "Local shell call output is missing for call id: {call_id}"
-                        ));
+                        warn!(
+                            "Local shell call output is missing for call id: {call_id}, inserting placeholder"
+                        );
                         missing_outputs_to_insert.push((
                             idx,
                             ResponseItem::FunctionCallOutput {
                                 call_id: call_id.clone(),
                                 output: FunctionCallOutputPayload {
-                                    content: "aborted".to_string(),
+                                    content: "aborted (tool execution interrupted)".to_string(),
                                     ..Default::default()
                                 },
                             },
@@ -128,18 +130,19 @@ pub(crate) fn remove_orphan_outputs(items: &mut Vec<ResponseItem>) {
             let has_match =
                 function_call_ids.contains(call_id) || local_shell_call_ids.contains(call_id);
             if !has_match {
-                error_or_panic(format!(
-                    "Orphan function call output for call id: {call_id}"
-                ));
+                // 这是正常的恢复流程，不应该 panic
+                warn!(
+                    "Orphan function call output for call id: {call_id}, removing"
+                );
             }
             has_match
         }
         ResponseItem::CustomToolCallOutput { call_id, .. } => {
             let has_match = custom_tool_call_ids.contains(call_id);
             if !has_match {
-                error_or_panic(format!(
-                    "Orphan custom tool call output for call id: {call_id}"
-                ));
+                warn!(
+                    "Orphan custom tool call output for call id: {call_id}, removing"
+                );
             }
             has_match
         }

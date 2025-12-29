@@ -11,6 +11,7 @@ use crate::function_tool::FunctionCallError;
 use crate::is_safe_command::is_known_safe_command;
 use crate::protocol::ExecCommandSource;
 use crate::sandboxing::SandboxPermissions;
+use crate::shell_utils::parse_json_with_recovery;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
@@ -29,9 +30,30 @@ pub struct ShellHandler;
 pub struct ShellCommandHandler;
 
 impl ShellHandler {
-    fn to_exec_params(params: ShellToolCallParams, turn_context: &TurnContext) -> ExecParams {
+    fn to_exec_params(
+        params: ShellToolCallParams,
+        session: &crate::codex::Session,
+        turn_context: &TurnContext,
+    ) -> ExecParams {
+        // command 现在是字符串格式，与 ShellCommandHandler 相同
+        // 检测命令是否包含 heredoc 语法或其他 shell 特性
+        use crate::shell_utils::contains_heredoc;
+        use crate::shell_utils::command_string_needs_shell;
+
+        let command = if contains_heredoc(&params.command) || command_string_needs_shell(&params.command) {
+            // 包含 heredoc 或 shell 特殊语法（重定向、管道等）的命令需要使用 shell 包装执行
+            // 因为这些是 shell 特性，必须由 shell 解释
+            tracing::info!("🔧 检测到 shell 特殊语法，使用 shell 包装执行: {}", &params.command);
+            let shell = session.user_shell();
+            shell.derive_exec_args(&params.command, true)
+        } else {
+            // 普通命令使用 shlex 解析
+            shlex::split(&params.command)
+                .unwrap_or_else(|| vec![params.command.clone()])
+        };
+
         ExecParams {
-            command: params.command,
+            command,
             cwd: turn_context.resolve_path(params.workdir.clone()),
             expiration: params.timeout_ms.into(),
             env: create_env(&turn_context.shell_environment_policy),
@@ -48,8 +70,21 @@ impl ShellCommandHandler {
         session: &crate::codex::Session,
         turn_context: &TurnContext,
     ) -> ExecParams {
-        let shell = session.user_shell();
-        let command = shell.derive_exec_args(&params.command, params.login.unwrap_or(true));
+        // 🔧 检测命令是否包含 shell 特殊语法
+        use crate::shell_utils::contains_heredoc;
+        use crate::shell_utils::command_string_needs_shell;
+
+        let command = if contains_heredoc(&params.command) || command_string_needs_shell(&params.command) {
+            // 包含 heredoc 或 shell 特殊语法（重定向、管道等）的命令需要使用 shell 包装执行
+            // 因为这些是 shell 特性，必须由 shell 解释
+            tracing::info!("🔧 检测到 shell 特殊语法，使用 shell 包装执行: {}", &params.command);
+            let shell = session.user_shell();
+            shell.derive_exec_args(&params.command, true)
+        } else {
+            // 普通命令使用 shlex 解析
+            shlex::split(&params.command)
+                .unwrap_or_else(|| vec![params.command.clone()])
+        };
 
         ExecParams {
             command,
@@ -79,11 +114,21 @@ impl ToolHandler for ShellHandler {
     async fn is_mutating(&self, invocation: &ToolInvocation) -> bool {
         match &invocation.payload {
             ToolPayload::Function { arguments } => {
-                serde_json::from_str::<ShellToolCallParams>(arguments)
-                    .map(|params| !is_known_safe_command(&params.command))
+                parse_json_with_recovery::<ShellToolCallParams>(arguments)
+                    .map(|params| {
+                        // command 现在是字符串，需要解析为数组以检查安全性
+                        let command = shlex::split(&params.command)
+                            .unwrap_or_else(|| vec![params.command.clone()]);
+                        !is_known_safe_command(&command)
+                    })
                     .unwrap_or(true)
             }
-            ToolPayload::LocalShell { params } => !is_known_safe_command(&params.command),
+            ToolPayload::LocalShell { params } => {
+                // LocalShell 的 params.command 现在也是 String，需要解析为数组
+                let command = shlex::split(&params.command)
+                    .unwrap_or_else(|| vec![params.command.clone()]);
+                !is_known_safe_command(&command)
+            }
             _ => true, // unknown payloads => assume mutating
         }
     }
@@ -101,12 +146,12 @@ impl ToolHandler for ShellHandler {
         match payload {
             ToolPayload::Function { arguments } => {
                 let params: ShellToolCallParams =
-                    serde_json::from_str(&arguments).map_err(|e| {
+                    parse_json_with_recovery(&arguments).map_err(|e| {
                         FunctionCallError::RespondToModel(format!(
                             "failed to parse function arguments: {e:?}"
                         ))
                     })?;
-                let exec_params = Self::to_exec_params(params, turn.as_ref());
+                let exec_params = Self::to_exec_params(params, session.as_ref(), turn.as_ref());
                 Self::run_exec_like(
                     tool_name.as_str(),
                     exec_params,
@@ -119,7 +164,7 @@ impl ToolHandler for ShellHandler {
                 .await
             }
             ToolPayload::LocalShell { params } => {
-                let exec_params = Self::to_exec_params(params, turn.as_ref());
+                let exec_params = Self::to_exec_params(params, session.as_ref(), turn.as_ref());
                 Self::run_exec_like(
                     tool_name.as_str(),
                     exec_params,
@@ -153,10 +198,18 @@ impl ToolHandler for ShellCommandHandler {
             return true;
         };
 
-        serde_json::from_str::<ShellCommandToolCallParams>(arguments)
+        parse_json_with_recovery::<ShellCommandToolCallParams>(arguments)
             .map(|params| {
-                let shell = invocation.session.user_shell();
-                let command = shell.derive_exec_args(&params.command, params.login.unwrap_or(true));
+                use crate::shell_utils::contains_heredoc;
+
+                // heredoc 命令通常用于写入文件，应视为 mutating
+                if contains_heredoc(&params.command) {
+                    return true;
+                }
+
+                // 普通命令使用 shlex 解析后检查
+                let command = shlex::split(&params.command)
+                    .unwrap_or_else(|| vec![params.command.clone()]);
                 !is_known_safe_command(&command)
             })
             .unwrap_or(true)
@@ -178,7 +231,7 @@ impl ToolHandler for ShellCommandHandler {
             )));
         };
 
-        let params: ShellCommandToolCallParams = serde_json::from_str(&arguments).map_err(|e| {
+        let params: ShellCommandToolCallParams = parse_json_with_recovery(&arguments).map_err(|e| {
             FunctionCallError::RespondToModel(format!("failed to parse function arguments: {e:?}"))
         })?;
         let exec_params = Self::to_exec_params(params, session.as_ref(), turn.as_ref());
@@ -290,6 +343,7 @@ mod tests {
     use std::path::PathBuf;
 
     use codex_protocol::models::ShellCommandToolCallParams;
+    use codex_protocol::models::ShellToolCallParams;
     use pretty_assertions::assert_eq;
 
     use crate::codex::make_session_and_context;
@@ -297,7 +351,9 @@ mod tests {
     use crate::is_safe_command::is_known_safe_command;
     use crate::shell::Shell;
     use crate::shell::ShellType;
+    use crate::shell_utils::{command_needs_shell_wrapping, join_command_for_shell};
     use crate::tools::handlers::ShellCommandHandler;
+    use crate::tools::handlers::ShellHandler;
 
     /// The logic for is_known_safe_command() has heuristics for known shells,
     /// so we must ensure the commands generated by [ShellCommandHandler] can be
@@ -346,7 +402,8 @@ mod tests {
         let with_escalated_permissions = Some(true);
         let justification = Some("because tests".to_string());
 
-        let expected_command = session.user_shell().derive_exec_args(&command, true);
+        // 🔧 现在命令直接使用 shlex 解析，不再用 session shell 包装
+        let expected_command = shlex::split(&command).unwrap();
         let expected_cwd = turn_context.resolve_path(workdir.clone());
         let expected_env = create_env(&turn_context.shell_environment_policy);
 
@@ -372,5 +429,193 @@ mod tests {
         );
         assert_eq!(exec_params.justification, justification);
         assert_eq!(exec_params.arg0, None);
+    }
+
+    #[test]
+    fn test_command_needs_shell_wrapping() {
+        // 包含 shell 操作符的命令
+        assert!(command_needs_shell_wrapping(&[
+            "cat".to_string(),
+            ">".to_string(),
+            "file.txt".to_string()
+        ]));
+        assert!(command_needs_shell_wrapping(&[
+            "cat".to_string(),
+            ">>".to_string(),
+            "file.txt".to_string()
+        ]));
+        assert!(command_needs_shell_wrapping(&[
+            "echo".to_string(),
+            "hello".to_string(),
+            "|".to_string(),
+            "grep".to_string(),
+            "h".to_string()
+        ]));
+        assert!(command_needs_shell_wrapping(&[
+            "ls".to_string(),
+            "&&".to_string(),
+            "pwd".to_string()
+        ]));
+        assert!(command_needs_shell_wrapping(&[
+            "cmd1".to_string(),
+            "||".to_string(),
+            "cmd2".to_string()
+        ]));
+
+        // 不包含 shell 操作符的普通命令
+        assert!(!command_needs_shell_wrapping(&[
+            "ls".to_string(),
+            "-la".to_string()
+        ]));
+        assert!(!command_needs_shell_wrapping(&[
+            "cat".to_string(),
+            "file.txt".to_string()
+        ]));
+        assert!(!command_needs_shell_wrapping(&["pwd".to_string()]));
+    }
+
+    #[test]
+    fn test_join_command_for_shell() {
+        // 简单命令
+        assert_eq!(
+            join_command_for_shell(&[
+                "cat".to_string(),
+                ">".to_string(),
+                "file.txt".to_string()
+            ]),
+            "cat > file.txt"
+        );
+
+        // 带空格的参数 - shell_utils 使用单引号
+        assert_eq!(
+            join_command_for_shell(&[
+                "echo".to_string(),
+                "hello world".to_string(),
+                ">".to_string(),
+                "file.txt".to_string()
+            ]),
+            "echo 'hello world' > file.txt"
+        );
+
+        // 管道命令
+        assert_eq!(
+            join_command_for_shell(&[
+                "cat".to_string(),
+                "file.txt".to_string(),
+                "|".to_string(),
+                "grep".to_string(),
+                "pattern".to_string()
+            ]),
+            "cat file.txt | grep pattern"
+        );
+    }
+
+    #[test]
+    fn shell_handler_wraps_command_with_shell_operators() {
+        let (session, turn_context) = make_session_and_context();
+
+        // 测试包含重定向操作符的命令（现在使用字符串格式）
+        let params = ShellToolCallParams {
+            command: "cat > test.txt".to_string(),
+            workdir: None,
+            timeout_ms: None,
+            with_escalated_permissions: None,
+            justification: None,
+            stdin: None,
+        };
+
+        let exec_params = ShellHandler::to_exec_params(params, &session, &turn_context);
+
+        // 包含 shell 操作符的命令应该被 shell 包装
+        // 因为重定向操作符需要由 shell 解释
+        let shell = session.user_shell();
+        let expected = shell.derive_exec_args("cat > test.txt", true);
+        assert_eq!(exec_params.command, expected);
+    }
+
+    #[test]
+    fn shell_handler_does_not_wrap_simple_commands() {
+        let (session, turn_context) = make_session_and_context();
+
+        // 测试不包含 shell 操作符的简单命令（现在使用字符串格式）
+        let params = ShellToolCallParams {
+            command: "ls -la".to_string(),
+            workdir: None,
+            timeout_ms: None,
+            with_escalated_permissions: None,
+            justification: None,
+            stdin: None,
+        };
+
+        let exec_params = ShellHandler::to_exec_params(params, &session, &turn_context);
+
+        // 简单命令不应该被包装
+        assert_eq!(exec_params.command, vec!["ls".to_string(), "-la".to_string()]);
+    }
+
+    #[test]
+    fn shell_handler_wraps_heredoc_commands() {
+        let (session, turn_context) = make_session_and_context();
+
+        // 测试 heredoc 命令会被 shell 包装
+        let params = ShellToolCallParams {
+            command: "cat > file.txt << 'EOF'\nhello\nEOF".to_string(),
+            workdir: None,
+            timeout_ms: None,
+            with_escalated_permissions: None,
+            justification: None,
+            stdin: None,
+        };
+
+        let exec_params = ShellHandler::to_exec_params(params, &session, &turn_context);
+
+        // heredoc 命令应该被 shell 包装
+        let shell = session.user_shell();
+        let expected = shell.derive_exec_args("cat > file.txt << 'EOF'\nhello\nEOF", true);
+        assert_eq!(exec_params.command, expected);
+    }
+
+    #[test]
+    fn shell_command_handler_parses_shell_wrapped_command() {
+        let (session, turn_context) = make_session_and_context();
+
+        // 测试 shell 包装格式的命令会被正确解析
+        let params = ShellCommandToolCallParams {
+            command: "bash -lc 'pacman -Qk 2>/dev/null | head -20'".to_string(),
+            workdir: None,
+            login: None,
+            timeout_ms: None,
+            with_escalated_permissions: None,
+            justification: None,
+        };
+
+        let exec_params = ShellCommandHandler::to_exec_params(params, &session, &turn_context);
+
+        // 命令应该被正确解析为参数数组，不添加额外包装
+        assert_eq!(exec_params.command, vec![
+            "bash".to_string(),
+            "-lc".to_string(),
+            "pacman -Qk 2>/dev/null | head -20".to_string()
+        ]);
+    }
+
+    #[test]
+    fn shell_command_handler_parses_simple_command() {
+        let (session, turn_context) = make_session_and_context();
+
+        // 测试普通命令会被直接解析，不添加 shell 包装
+        let params = ShellCommandToolCallParams {
+            command: "ls -la".to_string(),
+            workdir: None,
+            login: None,
+            timeout_ms: None,
+            with_escalated_permissions: None,
+            justification: None,
+        };
+
+        let exec_params = ShellCommandHandler::to_exec_params(params, &session, &turn_context);
+
+        // 🔧 命令应该被直接解析为参数数组，不添加任何 shell 包装
+        assert_eq!(exec_params.command, vec!["ls".to_string(), "-la".to_string()]);
     }
 }

@@ -5,8 +5,11 @@ use http::HeaderValue;
 pub(crate) fn build_conversation_headers(conversation_id: Option<String>) -> HeaderMap {
     let mut headers = HeaderMap::new();
     if let Some(id) = conversation_id {
+        // 原有的 headers（保持兼容性）
         insert_header(&mut headers, "conversation_id", &id);
         insert_header(&mut headers, "session_id", &id);
+        // Turn 签名验证需要的标准 header
+        insert_header(&mut headers, "x-conversation-id", &id);
     }
     headers
 }

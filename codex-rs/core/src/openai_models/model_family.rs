@@ -307,6 +307,15 @@ pub fn find_family_for_model(slug: &str) -> ModelFamily {
             truncation_policy: TruncationPolicy::Bytes(10_000),
             context_window: Some(CONTEXT_WINDOW_272K),
         )
+    // GLM (Zhipu) models - 使用 ShellCommand 类型，因为 GLM 在处理复杂的数组类型
+    // command 参数时容易生成畸形 JSON（尤其是 heredoc 命令）
+    } else if slug.starts_with("glm-") || slug.starts_with("GLM-") || slug.contains("glm") {
+        model_family!(
+            slug, "glm",
+            shell_type: ConfigShellToolType::ShellCommand,
+            context_window: Some(128_000),
+            truncation_policy: TruncationPolicy::Bytes(10_000),
+        )
     } else {
         derive_default_model_family(slug)
     }

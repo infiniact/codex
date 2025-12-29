@@ -10,6 +10,7 @@ use tokio::sync::Barrier;
 use tokio::time::sleep;
 
 use crate::function_tool::FunctionCallError;
+use crate::shell_utils::parse_json_with_recovery;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
@@ -71,7 +72,7 @@ impl ToolHandler for TestSyncHandler {
             }
         };
 
-        let args: TestSyncArgs = serde_json::from_str(&arguments).map_err(|err| {
+        let args: TestSyncArgs = parse_json_with_recovery(&arguments).map_err(|err| {
             FunctionCallError::RespondToModel(format!(
                 "failed to parse function arguments: {err:?}"
             ))

@@ -271,9 +271,24 @@ impl UnifiedExecSessionManager {
             request.command
         );
 
-        // Prepare command string - 使用智能格式化处理 bash -c 等命令
-        let command_str = format_command_for_execution(&request.command);
-        let shell = context.session.services.user_shell.shell_path.to_string_lossy().to_string();
+        // 🔧 修复：当有远程连接时，提取原始命令而不是保留 shell 包装
+        // 因为远程设备的 shell 环境未知（可能没有 /bin/zsh），直接发送原始命令
+        let (command_str, shell) = if connection_id.is_some() {
+            // 远程连接：检测是否是 shell 包装形式 (如 ["/bin/zsh", "-lc", "actual command"])
+            // 如果是，则提取原始脚本；否则使用原始命令
+            if let Some((_, script)) = extract_bash_command(&request.command) {
+                // 提取出原始脚本，不使用 shell 包装
+                (script.to_string(), String::new())
+            } else {
+                // 不是 shell 包装形式，使用原始命令格式化
+                (format_command_for_execution(&request.command), String::new())
+            }
+        } else {
+            // 本地执行：使用智能格式化处理 bash -c 等命令
+            let command_str = format_command_for_execution(&request.command);
+            let shell = context.session.services.user_shell.shell_path.to_string_lossy().to_string();
+            (command_str, shell)
+        };
 
         // Execute via bridge
         let result = bridge

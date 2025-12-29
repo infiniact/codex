@@ -34,10 +34,100 @@ impl ToolRouter {
         config: &ToolsConfig,
         mcp_tools: Option<HashMap<String, mcp_types::Tool>>,
     ) -> Self {
+        // Log the loaded tools before moving mcp_tools
+        Self::log_loaded_tools(&mcp_tools);
+
         let builder = build_specs(config, mcp_tools);
         let (specs, registry) = builder.build();
 
+        // Log the loaded specs after they are built
+        Self::log_loaded_specs(&specs);
+
         Self { registry, specs }
+    }
+
+    fn log_loaded_tools(mcp_tools: &Option<HashMap<String, mcp_types::Tool>>) {
+        use tracing::info;
+
+        info!("🔧 [ToolRouter] === MCP 工具信息 ===");
+
+        // 输出 MCP 工具信息
+        if let Some(mcp_tools) = mcp_tools {
+            if !mcp_tools.is_empty() {
+                info!("🌐 [ToolRouter] MCP 工具总数: {} 个", mcp_tools.len());
+                let mut mcp_servers = std::collections::HashSet::new();
+                for tool_name in mcp_tools.keys() {
+                    if let Some((server_name, _)) = crate::mcp::split_qualified_tool_name(tool_name) {
+                        mcp_servers.insert(server_name);
+                    }
+                }
+                for server in mcp_servers {
+                    info!("  • 服务器: {}", server);
+                    let server_tools: Vec<_> = mcp_tools.keys()
+                        .filter(|name| {
+                            if let Some((srv, _)) = crate::mcp::split_qualified_tool_name(name) {
+                                srv == server
+                            } else {
+                                false
+                            }
+                        })
+                        .collect();
+                    for tool in server_tools {
+                        info!("    - {}", tool);
+                    }
+                }
+            } else {
+                info!("🌐 [ToolRouter] 未配置 MCP 工具");
+            }
+        } else {
+            info!("🌐 [ToolRouter] 未配置 MCP 工具");
+        }
+
+        info!("🔧 [ToolRouter] === MCP 工具信息完成 ===");
+    }
+
+    fn log_loaded_specs(specs: &[ConfiguredToolSpec]) {
+        use tracing::info;
+
+        info!("🔧 [ToolRouter] === 已加载的工具规格 ===");
+        info!("📊 [ToolRouter] 总工具数量: {}", specs.len());
+
+        let mut categories = std::collections::HashMap::new();
+        let mut parallel_tools = Vec::new();
+
+        for spec in specs {
+            let tool_name = spec.spec.name();
+            let tool_type = match &spec.spec {
+                crate::client_common::tools::ToolSpec::Function(_) => "Function",
+                crate::client_common::tools::ToolSpec::LocalShell {} => "LocalShell",
+                crate::client_common::tools::ToolSpec::WebSearch {} => "WebSearch",
+                crate::client_common::tools::ToolSpec::Freeform(_) => "Freeform",
+            };
+
+            categories.entry(tool_type).or_insert_with(Vec::new).push(tool_name);
+
+            if spec.supports_parallel_tool_calls {
+                parallel_tools.push(tool_name);
+            }
+        }
+
+        // 按类别输出工具
+        for (category, tools) in categories {
+            info!("📦 [ToolRouter] {}: {} 个", category, tools.len());
+            for tool in tools {
+                info!("  • {}", tool);
+            }
+        }
+
+        // 输出支持并行的工具
+        if !parallel_tools.is_empty() {
+            info!("⚡ [ToolRouter] 支持并行调用的工具: {} 个", parallel_tools.len());
+            for tool in parallel_tools {
+                info!("  • {}", tool);
+            }
+        }
+
+        info!("🔧 [ToolRouter] === 工具规格加载完成 ===");
     }
 
     pub fn specs(&self) -> Vec<ToolSpec> {
@@ -111,7 +201,8 @@ impl ToolRouter {
                 match action {
                     LocalShellAction::Exec(exec) => {
                         let params = ShellToolCallParams {
-                            command: exec.command,
+                            // Convert Vec<String> to space-separated String
+                            command: exec.command.join(" "),
                             workdir: exec.working_directory,
                             timeout_ms: exec.timeout_ms,
                             with_escalated_permissions: None,

@@ -917,6 +917,7 @@ async fn on_patch_approval_response(
                 .submit(Op::PatchApproval {
                     id: event_turn_id.clone(),
                     decision: ReviewDecision::Denied,
+                    custom_message: None,
                 })
                 .await
             {
@@ -938,6 +939,7 @@ async fn on_patch_approval_response(
         .submit(Op::PatchApproval {
             id: event_turn_id,
             decision: response.decision,
+            custom_message: None,
         })
         .await
     {
@@ -974,6 +976,7 @@ async fn on_exec_approval_response(
         .submit(Op::ExecApproval {
             id: event_turn_id,
             decision: response.decision,
+            custom_message: None,
         })
         .await
     {
@@ -1105,6 +1108,7 @@ async fn on_file_change_request_approval_response(
         .submit(Op::PatchApproval {
             id: event_turn_id,
             decision,
+            custom_message: None,
         })
         .await
     {
@@ -1184,6 +1188,7 @@ async fn on_command_execution_request_approval_response(
         .submit(Op::ExecApproval {
             id: event_turn_id,
             decision,
+            custom_message: None,
         })
         .await
     {

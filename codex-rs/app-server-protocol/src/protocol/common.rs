@@ -28,6 +28,10 @@ impl GitSha {
 pub enum AuthMode {
     ApiKey,
     ChatGPT,
+    /// 用户 Access Token 模式：使用 IAAccount OAuth 登录获取的 JWT access_token
+    /// 通过 X-User-Access-Token header 发送，用于代理服务认证和用量追踪
+    #[serde(rename = "user_access_token")]
+    UserAccessToken,
 }
 
 /// Generates an `enum ClientRequest` where each variant is a request that the

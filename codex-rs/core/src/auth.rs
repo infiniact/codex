@@ -47,6 +47,10 @@ pub struct CodexAuth {
     pub(crate) auth_dot_json: Arc<Mutex<Option<AuthDotJson>>>,
     storage: Arc<dyn AuthStorageBackend>,
     pub(crate) client: CodexHttpClient,
+
+    /// 用户 Access Token（IAAccount OAuth JWT）
+    /// 用于 UserAccessToken 模式，通过 X-User-Access-Token header 发送
+    pub(crate) user_access_token: Option<String>,
 }
 
 impl PartialEq for CodexAuth {
@@ -200,7 +204,24 @@ impl CodexAuth {
                 let id_token = self.get_token_data().await?.access_token;
                 Ok(id_token)
             }
+            AuthMode::UserAccessToken => {
+                // UserAccessToken 模式：返回用户的 access token
+                // 注意：这个 token 用于 X-User-Access-Token header，不是 Bearer token
+                Ok(self.user_access_token.clone().unwrap_or_default())
+            }
         }
+    }
+
+    /// 获取用户 access token（用于 X-User-Access-Token header）
+    /// 仅在 UserAccessToken 模式下有效
+    pub fn get_user_access_token(&self) -> Option<String> {
+        self.user_access_token.clone()
+    }
+
+    /// 设置用户 access token
+    /// 用于从前端同步 IAAccount OAuth token
+    pub fn set_user_access_token(&mut self, token: Option<String>) {
+        self.user_access_token = token;
     }
 
     pub fn get_account_id(&self) -> Option<String> {
@@ -263,6 +284,7 @@ impl CodexAuth {
             storage: create_auth_storage(PathBuf::new(), AuthCredentialsStoreMode::File),
             auth_dot_json,
             client: crate::default_client::create_client(),
+            user_access_token: None,
         }
     }
 
@@ -273,11 +295,38 @@ impl CodexAuth {
             storage: create_auth_storage(PathBuf::new(), AuthCredentialsStoreMode::File),
             auth_dot_json: Arc::new(Mutex::new(None)),
             client,
+            user_access_token: None,
         }
     }
 
     pub fn from_api_key(api_key: &str) -> Self {
         Self::from_api_key_with_client(api_key, crate::default_client::create_client())
+    }
+
+    /// 从用户 access token 创建 CodexAuth（UserAccessToken 模式）
+    /// 用于 IAAccount OAuth 登录后同步 token 到 Codex
+    pub fn from_user_access_token(user_token: &str) -> Self {
+        Self {
+            api_key: None,
+            mode: AuthMode::UserAccessToken,
+            storage: create_auth_storage(PathBuf::new(), AuthCredentialsStoreMode::File),
+            auth_dot_json: Arc::new(Mutex::new(None)),
+            client: crate::default_client::create_client(),
+            user_access_token: Some(user_token.to_owned()),
+        }
+    }
+
+    /// 从用户 access token 创建 CodexAuth，并指定 Bearer token（用于代理服务）
+    /// 当代理服务需要同时验证 Bearer token 和用户身份时使用
+    pub fn from_user_access_token_with_api_key(user_token: &str, api_key: &str) -> Self {
+        Self {
+            api_key: Some(api_key.to_owned()),
+            mode: AuthMode::UserAccessToken,
+            storage: create_auth_storage(PathBuf::new(), AuthCredentialsStoreMode::File),
+            auth_dot_json: Arc::new(Mutex::new(None)),
+            client: crate::default_client::create_client(),
+            user_access_token: Some(user_token.to_owned()),
+        }
     }
 }
 
@@ -365,6 +414,12 @@ pub async fn enforce_login_restrictions(config: &Config) -> std::io::Result<()> 
             ),
             (ForcedLoginMethod::Chatgpt, AuthMode::ApiKey) => Some(
                 "ChatGPT login is required, but an API key is currently being used. Logging out."
+                    .to_string(),
+            ),
+            // UserAccessToken 模式：与 API key 模式兼容（都是非 ChatGPT 模式）
+            (ForcedLoginMethod::Api, AuthMode::UserAccessToken) => None,
+            (ForcedLoginMethod::Chatgpt, AuthMode::UserAccessToken) => Some(
+                "ChatGPT login is required, but user access token is currently being used. Logging out."
                     .to_string(),
             ),
         };
@@ -473,6 +528,7 @@ fn load_auth(
             last_refresh,
         }))),
         client,
+        user_access_token: None,
     }))
 }
 

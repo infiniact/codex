@@ -291,7 +291,7 @@ async fn handle_exec_approval(
     )
     .await;
 
-    let _ = codex.submit(Op::ExecApproval { id, decision }).await;
+    let _ = codex.submit(Op::ExecApproval { id, decision, custom_message: None }).await;
 }
 
 /// Handle an ApplyPatchApprovalRequest by consulting the parent session and replying.
@@ -319,7 +319,7 @@ async fn handle_patch_approval(
         cancel_token,
     )
     .await;
-    let _ = codex.submit(Op::PatchApproval { id, decision }).await;
+    let _ = codex.submit(Op::PatchApproval { id, decision, custom_message: None }).await;
 }
 
 /// Await an approval decision, aborting on cancellation.

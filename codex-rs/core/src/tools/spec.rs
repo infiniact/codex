@@ -10,6 +10,7 @@ use crate::tools::handlers::apply_patch::create_apply_patch_json_tool;
 use crate::tools::registry::ToolRegistryBuilder;
 use codex_protocol::openai_models::ConfigShellToolType;
 use serde::Deserialize;
+use serde::Deserializer;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use serde_json::json;
@@ -255,9 +256,11 @@ fn create_shell_tool() -> ToolSpec {
     let mut properties = BTreeMap::new();
     properties.insert(
         "command".to_string(),
-        JsonSchema::Array {
-            items: Box::new(JsonSchema::String { description: None }),
-            description: Some("The command to execute".to_string()),
+        JsonSchema::String {
+            description: Some(
+                "The shell command or script to execute. For complex commands with heredoc, pipes, or redirects, pass the entire command as a single string."
+                    .to_string(),
+            ),
         },
     );
     properties.insert(
@@ -287,19 +290,19 @@ fn create_shell_tool() -> ToolSpec {
     );
 
     let description  = if cfg!(windows) {
-        r#"Runs a Powershell command (Windows) and returns its output. Arguments to `shell` will be passed to CreateProcessW(). Most commands should be prefixed with ["powershell.exe", "-Command"].
-        
+        r#"Runs a Powershell command (Windows) and returns its output.
+
 Examples of valid command strings:
 
-- ls -a (show hidden): ["powershell.exe", "-Command", "Get-ChildItem -Force"]
-- recursive find by name: ["powershell.exe", "-Command", "Get-ChildItem -Recurse -Filter *.py"]
-- recursive grep: ["powershell.exe", "-Command", "Get-ChildItem -Path C:\\myrepo -Recurse | Select-String -Pattern 'TODO' -CaseSensitive"]
-- ps aux | grep python: ["powershell.exe", "-Command", "Get-Process | Where-Object { $_.ProcessName -like '*python*' }"]
-- setting an env var: ["powershell.exe", "-Command", "$env:FOO='bar'; echo $env:FOO"]
-- running an inline Python script: ["powershell.exe", "-Command", "@'\\nprint('Hello, world!')\\n'@ | python -"]"#
+- ls -a (show hidden): "Get-ChildItem -Force"
+- recursive find by name: "Get-ChildItem -Recurse -Filter *.py"
+- recursive grep: "Get-ChildItem -Path C:\\myrepo -Recurse | Select-String -Pattern 'TODO' -CaseSensitive"
+- ps aux | grep python: "Get-Process | Where-Object { $_.ProcessName -like '*python*' }"
+- setting an env var: "$env:FOO='bar'; echo $env:FOO"
+- running an inline Python script: "@'\nprint('Hello, world!')\n'@ | python -""#
     } else {
         r#"Runs a shell command and returns its output.
-- The arguments to `shell` will be passed to execvp(). Most terminal commands should be prefixed with ["bash", "-lc"].
+- Pass the command as a string. Complex commands with pipes, redirects, or heredoc are fully supported.
 - Always set the `workdir` param when using the shell function. Do not use `cd` unless absolutely necessary."#
     }.to_string();
 
@@ -787,7 +790,87 @@ fn create_read_mcp_resource_tool(available_servers: &[String]) -> ToolSpec {
 /// TODO(dylan): deprecate once we get rid of json tool
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ApplyPatchToolArgs {
+    /// The patch content - primary field name
+    #[serde(alias = "patch", alias = "content", alias = "diff", alias = "command", deserialize_with = "deserialize_patch_input")]
     pub(crate) input: String,
+}
+
+/// Deserialize patch input field, supporting string, array, and object formats
+fn deserialize_patch_input<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = JsonValue::deserialize(deserializer)?;
+
+    match value {
+        JsonValue::String(s) => {
+            // Check if the string is actually a stringified JSON array
+            let trimmed = s.trim();
+            if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                // Try to parse as JSON array
+                if let Ok(arr) = serde_json::from_str::<Vec<String>>(trimmed) {
+                    // Join array elements into a single string
+                    return Ok(arr.join("\n"));
+                }
+            }
+            Ok(s)
+        }
+        JsonValue::Array(arr) => {
+            // Handle actual arrays - join all string elements
+            let parts: Vec<String> = arr.iter()
+                .filter_map(|v| v.as_str().map(ToString::to_string))
+                .collect();
+            if parts.is_empty() {
+                Err(serde::de::Error::custom(
+                    "array contained no string elements"
+                ))
+            } else {
+                Ok(parts.join("\n"))
+            }
+        }
+        JsonValue::Object(obj) => {
+            // Try to extract string from object
+            let s = obj.get("input")
+                .or_else(|| obj.get("patch"))
+                .or_else(|| obj.get("content"))
+                .or_else(|| obj.get("diff"))
+                .or_else(|| obj.get("command"))
+                .or_else(|| obj.get("value"))
+                .or_else(|| obj.get("text"));
+
+            match s {
+                Some(JsonValue::String(s)) => {
+                    // Also check for stringified array inside the object field
+                    let trimmed = s.trim();
+                    if trimmed.starts_with('[')
+                        && trimmed.ends_with(']')
+                        && let Ok(arr) = serde_json::from_str::<Vec<String>>(trimmed)
+                    {
+                        return Ok(arr.join("\n"));
+                    }
+                    Ok(s.clone())
+                }
+                Some(JsonValue::Array(arr)) => {
+                    let parts: Vec<String> = arr.iter()
+                        .filter_map(|v| v.as_str().map(ToString::to_string))
+                        .collect();
+                    if parts.is_empty() {
+                        Err(serde::de::Error::custom(
+                            "array contained no string elements"
+                        ))
+                    } else {
+                        Ok(parts.join("\n"))
+                    }
+                }
+                _ => Err(serde::de::Error::custom(
+                    "expected string or array value in object"
+                ))
+            }
+        }
+        _ => Err(serde::de::Error::custom(
+            "expected string, array, or object containing string"
+        ))
+    }
 }
 
 /// Returns JSON values that are compatible with Function Calling in the
@@ -1966,19 +2049,19 @@ mod tests {
         assert_eq!(name, "shell");
 
         let expected = if cfg!(windows) {
-            r#"Runs a Powershell command (Windows) and returns its output. Arguments to `shell` will be passed to CreateProcessW(). Most commands should be prefixed with ["powershell.exe", "-Command"].
-        
+            r#"Runs a Powershell command (Windows) and returns its output.
+
 Examples of valid command strings:
 
-- ls -a (show hidden): ["powershell.exe", "-Command", "Get-ChildItem -Force"]
-- recursive find by name: ["powershell.exe", "-Command", "Get-ChildItem -Recurse -Filter *.py"]
-- recursive grep: ["powershell.exe", "-Command", "Get-ChildItem -Path C:\\myrepo -Recurse | Select-String -Pattern 'TODO' -CaseSensitive"]
-- ps aux | grep python: ["powershell.exe", "-Command", "Get-Process | Where-Object { $_.ProcessName -like '*python*' }"]
-- setting an env var: ["powershell.exe", "-Command", "$env:FOO='bar'; echo $env:FOO"]
-- running an inline Python script: ["powershell.exe", "-Command", "@'\\nprint('Hello, world!')\\n'@ | python -"]"#
+- ls -a (show hidden): "Get-ChildItem -Force"
+- recursive find by name: "Get-ChildItem -Recurse -Filter *.py"
+- recursive grep: "Get-ChildItem -Path C:\\myrepo -Recurse | Select-String -Pattern 'TODO' -CaseSensitive"
+- ps aux | grep python: "Get-Process | Where-Object { $_.ProcessName -like '*python*' }"
+- setting an env var: "$env:FOO='bar'; echo $env:FOO"
+- running an inline Python script: "@'\nprint('Hello, world!')\n'@ | python -""#
         } else {
             r#"Runs a shell command and returns its output.
-- The arguments to `shell` will be passed to execvp(). Most terminal commands should be prefixed with ["bash", "-lc"].
+- Pass the command as a string. Complex commands with pipes, redirects, or heredoc are fully supported.
 - Always set the `workdir` param when using the shell function. Do not use `cd` unless absolutely necessary."#
         }.to_string();
         assert_eq!(description, &expected);

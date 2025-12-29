@@ -77,6 +77,7 @@ async fn run_snapshot_command(command: &str) -> Result<SnapshotRun> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 

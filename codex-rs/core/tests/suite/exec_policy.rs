@@ -80,6 +80,7 @@ async fn execpolicy_blocks_shell_invocation() -> Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 

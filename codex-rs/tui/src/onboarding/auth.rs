@@ -114,8 +114,14 @@ impl KeyboardHandler for AuthModeWidget {
                         AuthMode::ApiKey if self.is_api_login_allowed() => {
                             self.start_api_key_entry();
                         }
+                        AuthMode::UserAccessToken if self.is_api_login_allowed() => {
+                            self.start_api_key_entry();
+                        }
                         AuthMode::ChatGPT => {}
                         AuthMode::ApiKey => {
+                            self.disallow_api_login();
+                        }
+                        AuthMode::UserAccessToken => {
                             self.disallow_api_login();
                         }
                     },

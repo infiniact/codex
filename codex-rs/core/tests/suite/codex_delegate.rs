@@ -95,6 +95,7 @@ async fn codex_delegate_forwards_exec_approval_and_proceeds_on_approval() {
         .submit(Op::ExecApproval {
             id: "0".into(),
             decision: ReviewDecision::Approved,
+                custom_message: None,
         })
         .await
         .expect("submit exec approval");
@@ -169,6 +170,7 @@ async fn codex_delegate_forwards_patch_approval_and_proceeds_on_decision() {
         .submit(Op::PatchApproval {
             id: "0".into(),
             decision: ReviewDecision::Denied,
+            custom_message: None,
         })
         .await
         .expect("submit patch approval");

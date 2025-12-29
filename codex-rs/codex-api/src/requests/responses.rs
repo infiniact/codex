@@ -6,6 +6,7 @@ use crate::provider::Provider;
 use crate::requests::headers::build_conversation_headers;
 use crate::requests::headers::insert_header;
 use crate::requests::headers::subagent_header;
+use crate::turn_signing::TurnSignature;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::SessionSource;
 use http::HeaderMap;
@@ -32,6 +33,8 @@ pub struct ResponsesRequestBuilder<'a> {
     conversation_id: Option<String>,
     session_source: Option<SessionSource>,
     store_override: Option<bool>,
+    /// 是否为用户主动发送（用于服务端统计）
+    is_user_turn: bool,
     headers: HeaderMap,
 }
 
@@ -41,6 +44,7 @@ impl<'a> ResponsesRequestBuilder<'a> {
             model: Some(model),
             instructions: Some(instructions),
             input: Some(input),
+            is_user_turn: true, // 默认为用户主动发送
             ..Default::default()
         }
     }
@@ -90,6 +94,12 @@ impl<'a> ResponsesRequestBuilder<'a> {
         self
     }
 
+    /// 设置是否为用户主动发送
+    pub fn is_user_turn(mut self, value: bool) -> Self {
+        self.is_user_turn = value;
+        self
+    }
+
     pub fn extra_headers(mut self, headers: HeaderMap) -> Self {
         self.headers = headers;
         self
@@ -134,9 +144,23 @@ impl<'a> ResponsesRequestBuilder<'a> {
         }
 
         let mut headers = self.headers;
-        headers.extend(build_conversation_headers(self.conversation_id));
+        headers.extend(build_conversation_headers(self.conversation_id.clone()));
         if let Some(subagent) = subagent_header(&self.session_source) {
             insert_header(&mut headers, "x-openai-subagent", &subagent);
+        }
+
+        // 🔢 添加 is_user_turn 签名 header
+        if let Some(ref conv_id) = self.conversation_id {
+            let signature = TurnSignature::sign(conv_id, self.is_user_turn);
+            insert_header(&mut headers, "x-iaterm-turn", signature.turn_value());
+            insert_header(&mut headers, "x-iaterm-turn-timestamp", &signature.timestamp.to_string());
+            insert_header(&mut headers, "x-iaterm-turn-signature", &signature.signature);
+            debug!(
+                "🔢 [ResponsesRequestBuilder::build] is_user_turn={}, turn={}, conv_id={}",
+                self.is_user_turn,
+                signature.turn_value(),
+                conv_id
+            );
         }
 
         // 🔍 DEBUG: 记录完整的请求体

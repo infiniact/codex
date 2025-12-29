@@ -23,6 +23,8 @@ use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::plan_tool::StepStatus;
+use codex_protocol::plan_tool::UpdatePlanArgs;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::user_input::UserInput;
 use futures::prelude::*;
@@ -32,6 +34,9 @@ use tracing::info;
 pub const SUMMARIZATION_PROMPT: &str = include_str!("../templates/compact/prompt.md");
 pub const SUMMARY_PREFIX: &str = include_str!("../templates/compact/summary_prefix.md");
 const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
+/// Plan 上下文的前缀标记，用于在历史中标识 plan 信息
+const PLAN_CONTEXT_PREFIX: &str = "<CURRENT_PLAN_STATUS>";
+const PLAN_CONTEXT_SUFFIX: &str = "</CURRENT_PLAN_STATUS>";
 
 pub(crate) fn should_use_remote_compact_task(session: &Session) -> bool {
     session
@@ -140,6 +145,7 @@ async fn run_compact_task_inner(
             top_k: None,
             top_p: None,
             repetition_penalty: None,
+            is_user_turn: false, // compact 是系统自动操作
         };
         let attempt_result = drain_to_completed(&sess, turn_context.as_ref(), &prompt).await;
 
@@ -202,8 +208,28 @@ async fn run_compact_task_inner(
     let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
     let user_messages = collect_user_messages(&history_snapshot);
 
+    // 获取当前的 plan 状态，用于在 compact 后恢复
+    let current_plan = sess.get_current_plan().await;
+
     let initial_context = sess.build_initial_context(turn_context.as_ref());
     let mut new_history = build_compacted_history(initial_context, &user_messages, &summary_text);
+
+    // 如果有活跃的 plan，将其作为上下文注入到新历史中
+    if let Some(plan) = current_plan {
+        let plan_context = format_plan_as_context(&plan);
+        info!(
+            "📋 [Compact] 注入 plan 上下文: {} 个步骤",
+            plan.plan.len()
+        );
+        new_history.push(ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: plan_context,
+            }],
+        });
+    }
+
     let ghost_snapshots: Vec<ResponseItem> = history_snapshot
         .iter()
         .filter(|item| matches!(item, ResponseItem::GhostSnapshot { .. }))
@@ -329,6 +355,46 @@ fn build_compacted_history_with_limit(
     });
 
     history
+}
+
+/// 将 plan 状态格式化为上下文消息，用于在 compact 后恢复 plan 信息
+fn format_plan_as_context(plan: &UpdatePlanArgs) -> String {
+    let mut lines = Vec::new();
+    lines.push(PLAN_CONTEXT_PREFIX.to_string());
+    lines.push("The following is the current task plan status that was active before context compaction:".to_string());
+    lines.push(String::new());
+
+    if let Some(explanation) = &plan.explanation {
+        lines.push(format!("Explanation: {explanation}"));
+        lines.push(String::new());
+    }
+
+    lines.push("Plan Steps:".to_string());
+    for (i, step) in plan.plan.iter().enumerate() {
+        let status_icon = match step.status {
+            StepStatus::Pending => "[ ]",
+            StepStatus::InProgress => "[→]",
+            StepStatus::Completed => "[✓]",
+        };
+        let status_text = match step.status {
+            StepStatus::Pending => "pending",
+            StepStatus::InProgress => "in_progress",
+            StepStatus::Completed => "completed",
+        };
+        lines.push(format!(
+            "{}. {} {} ({})",
+            i + 1,
+            status_icon,
+            step.step,
+            status_text
+        ));
+    }
+
+    lines.push(String::new());
+    lines.push("IMPORTANT: Continue executing the remaining pending/in_progress steps. Do NOT restart or recreate the plan.".to_string());
+    lines.push(PLAN_CONTEXT_SUFFIX.to_string());
+
+    lines.join("\n")
 }
 
 async fn drain_to_completed(

@@ -19,7 +19,7 @@ use std::env::VarError;
 use std::time::Duration;
 
 use crate::error::EnvVarError;
-const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = 300_000;
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_STREAM_MAX_RETRIES: u64 = 5;
 const DEFAULT_REQUEST_MAX_RETRIES: u64 = 4;
 /// Hard cap for user-configured `stream_max_retries`.

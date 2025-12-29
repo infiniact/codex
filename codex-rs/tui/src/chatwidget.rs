@@ -564,8 +564,8 @@ impl ChatWidget {
         if percent_known {
             return None;
         }
-
-        Some(info.total_token_usage.tokens_in_context_window())
+        // 使用 last_token_usage 来反映 compact 后的实际上下文大小
+        Some(info.last_token_usage.tokens_in_context_window())
     }
 
     fn restore_pre_review_token_info(&mut self) {
@@ -3231,9 +3231,10 @@ impl ChatWidget {
     }
 
     pub(crate) fn token_usage(&self) -> TokenUsage {
+        // 使用 last_token_usage 来反映 compact 后的实际上下文大小
         self.token_info
             .as_ref()
-            .map(|ti| ti.total_token_usage.clone())
+            .map(|ti| ti.last_token_usage.clone())
             .unwrap_or_default()
     }
 

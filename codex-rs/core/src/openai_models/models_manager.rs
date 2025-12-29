@@ -91,6 +91,11 @@ impl ModelsManager {
             .map(|models| models.clone())
     }
 
+    /// Returns a reference to the auth manager.
+    pub fn get_auth_manager(&self) -> Arc<AuthManager> {
+        self.auth_manager.clone()
+    }
+
     /// Look up the requested model family while applying remote metadata overrides.
     pub async fn construct_model_family(&self, model: &str, config: &Config) -> ModelFamily {
         find_family_for_model(model)

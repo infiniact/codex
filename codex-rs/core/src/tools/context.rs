@@ -52,7 +52,7 @@ impl ToolPayload {
         match self {
             ToolPayload::Function { arguments } => Cow::Borrowed(arguments),
             ToolPayload::Custom { input } => Cow::Borrowed(input),
-            ToolPayload::LocalShell { params } => Cow::Owned(params.command.join(" ")),
+            ToolPayload::LocalShell { params } => Cow::Borrowed(&params.command),
             ToolPayload::UnifiedExec { arguments } => Cow::Borrowed(arguments),
             ToolPayload::Mcp { raw_arguments, .. } => Cow::Borrowed(raw_arguments),
         }

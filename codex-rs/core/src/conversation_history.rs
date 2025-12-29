@@ -2,12 +2,12 @@ use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 
-use crate::util::error_or_panic;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
 use codex_utils_string::take_bytes_at_char_boundary;
 use codex_utils_string::take_last_bytes_at_char_boundary;
 use std::ops::Deref;
+use tracing::warn;
 
 // Model-formatting limits: clients get full streams; only content sent to the model is truncated.
 pub(crate) const MODEL_FORMAT_MAX_BYTES: usize = 10 * 1024; // 10 KiB
@@ -141,15 +141,17 @@ impl ConversationHistory {
                     });
 
                     if !has_output {
-                        error_or_panic(format!(
-                            "Function call output is missing for call id: {call_id}"
-                        ));
+                        // 这是正常的恢复流程（例如 SSE 超时重试），不应该 panic
+                        // 只记录警告并插入占位符输出
+                        warn!(
+                            "Function call output is missing for call id: {call_id}, inserting placeholder"
+                        );
                         missing_outputs_to_insert.push((
                             idx,
                             ResponseItem::FunctionCallOutput {
                                 call_id: call_id.clone(),
                                 output: FunctionCallOutputPayload {
-                                    content: "aborted".to_string(),
+                                    content: "aborted (tool execution interrupted)".to_string(),
                                     ..Default::default()
                                 },
                             },
@@ -165,14 +167,14 @@ impl ConversationHistory {
                     });
 
                     if !has_output {
-                        error_or_panic(format!(
-                            "Custom tool call output is missing for call id: {call_id}"
-                        ));
+                        warn!(
+                            "Custom tool call output is missing for call id: {call_id}, inserting placeholder"
+                        );
                         missing_outputs_to_insert.push((
                             idx,
                             ResponseItem::CustomToolCallOutput {
                                 call_id: call_id.clone(),
-                                output: "aborted".to_string(),
+                                output: "aborted (tool execution interrupted)".to_string(),
                             },
                         ));
                     }
@@ -188,15 +190,15 @@ impl ConversationHistory {
                         });
 
                         if !has_output {
-                            error_or_panic(format!(
-                                "Local shell call output is missing for call id: {call_id}"
-                            ));
+                            warn!(
+                                "Local shell call output is missing for call id: {call_id}, inserting placeholder"
+                            );
                             missing_outputs_to_insert.push((
                                 idx,
                                 ResponseItem::FunctionCallOutput {
                                     call_id: call_id.clone(),
                                     output: FunctionCallOutputPayload {
-                                        content: "aborted".to_string(),
+                                        content: "aborted (tool execution interrupted)".to_string(),
                                         ..Default::default()
                                     },
                                 },
@@ -251,7 +253,8 @@ impl ConversationHistory {
                     });
 
                     if !has_call {
-                        error_or_panic(format!("Function call is missing for call id: {call_id}"));
+                        // 这是正常的恢复流程，不应该 panic
+                        warn!("Function call is missing for call id: {call_id}, removing orphan output");
                         orphan_output_call_ids.insert(call_id.clone());
                     }
                 }
@@ -264,9 +267,9 @@ impl ConversationHistory {
                     });
 
                     if !has_call {
-                        error_or_panic(format!(
-                            "Custom tool call is missing for call id: {call_id}"
-                        ));
+                        warn!(
+                            "Custom tool call is missing for call id: {call_id}, removing orphan output"
+                        );
                         orphan_output_call_ids.insert(call_id.clone());
                     }
                 }
@@ -628,6 +631,7 @@ mod tests {
                 name: "do_it".to_string(),
                 arguments: "{}".to_string(),
                 call_id: "call-1".to_string(),
+                thought_signature: None,
             },
             ResponseItem::FunctionCallOutput {
                 call_id: "call-1".to_string(),
@@ -657,6 +661,7 @@ mod tests {
                 name: "do_it".to_string(),
                 arguments: "{}".to_string(),
                 call_id: "call-2".to_string(),
+                thought_signature: None,
             },
         ];
         let mut h = create_history_with_items(items);
@@ -974,6 +979,7 @@ mod tests {
             name: "do_it".to_string(),
             arguments: "{}".to_string(),
             call_id: "call-x".to_string(),
+            thought_signature: None,
         }];
         let mut h = create_history_with_items(items);
 
@@ -987,6 +993,7 @@ mod tests {
                     name: "do_it".to_string(),
                     arguments: "{}".to_string(),
                     call_id: "call-x".to_string(),
+                    thought_signature: None,
                 },
                 ResponseItem::FunctionCallOutput {
                     call_id: "call-x".to_string(),
@@ -1117,6 +1124,7 @@ mod tests {
                 name: "f1".to_string(),
                 arguments: "{}".to_string(),
                 call_id: "c1".to_string(),
+                thought_signature: None,
             },
             // Orphan output that should be removed
             ResponseItem::FunctionCallOutput {
@@ -1212,6 +1220,7 @@ mod tests {
             name: "do_it".to_string(),
             arguments: "{}".to_string(),
             call_id: "call-x".to_string(),
+            thought_signature: None,
         }];
         let mut h = create_history_with_items(items);
         h.normalize_history();
@@ -1289,6 +1298,7 @@ mod tests {
                 name: "f1".to_string(),
                 arguments: "{}".to_string(),
                 call_id: "c1".to_string(),
+                thought_signature: None,
             },
             ResponseItem::FunctionCallOutput {
                 call_id: "c2".to_string(),

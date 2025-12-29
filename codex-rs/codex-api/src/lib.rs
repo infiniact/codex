@@ -7,6 +7,7 @@ pub mod rate_limits;
 pub mod requests;
 pub mod sse;
 pub mod telemetry;
+pub mod turn_signing;
 
 pub use codex_client::RequestTelemetry;
 pub use codex_client::ReqwestTransport;

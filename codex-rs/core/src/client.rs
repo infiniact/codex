@@ -253,6 +253,7 @@ impl ModelClient {
                     &api_prompt,
                     Some(conversation_id.clone()),
                     Some(session_source.clone()),
+                    prompt.is_user_turn,
                 )
                 .await;
 
@@ -406,6 +407,7 @@ impl ModelClient {
                 store_override: None,
                 conversation_id: Some(conversation_id.clone()),
                 session_source: Some(session_source.clone()),
+                is_user_turn: prompt.is_user_turn,
             };
 
             tracing::warn!("📡 [stream_responses_api] 发送请求到 API...");
@@ -899,7 +901,7 @@ mod tests {
         let stream = ReaderStream::new(reader)
             .map_err(|err| codex_api::TransportError::Network(err.to_string()));
         let (tx, mut rx) =
-            mpsc::channel::<std::result::Result<ResponseEvent, codex_api::error::ApiError>>(16);
+            mpsc::unbounded_channel::<std::result::Result<ResponseEvent, codex_api::error::ApiError>>();
         tokio::spawn(process_sse(
             Box::pin(stream),
             tx,
@@ -936,7 +938,7 @@ mod tests {
         }
 
         let (tx, mut rx) =
-            mpsc::channel::<std::result::Result<ResponseEvent, codex_api::error::ApiError>>(8);
+            mpsc::unbounded_channel::<std::result::Result<ResponseEvent, codex_api::error::ApiError>>();
         let stream = ReaderStream::new(std::io::Cursor::new(body))
             .map_err(|err| codex_api::TransportError::Network(err.to_string()));
         tokio::spawn(process_sse(

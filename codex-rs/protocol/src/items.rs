@@ -134,11 +134,13 @@ impl ReasoningItem {
             }));
         }
 
-        if show_raw_agent_reasoning {
-            for entry in &self.raw_content {
+        if show_raw_agent_reasoning && !self.raw_content.is_empty() {
+            // 将 raw_content 的多个片段连接成连续的文本
+            let combined_text = self.raw_content.join("");
+            if !combined_text.trim().is_empty() {
                 events.push(EventMsg::AgentReasoningRawContent(
                     AgentReasoningRawContentEvent {
-                        text: entry.clone(),
+                        text: combined_text,
                     },
                 ));
             }

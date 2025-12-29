@@ -1023,6 +1023,7 @@ impl CodexMessageProcessor {
         let account = match self.auth_manager.auth() {
             Some(auth) => Some(match auth.mode {
                 AuthMode::ApiKey => Account::ApiKey {},
+                AuthMode::UserAccessToken => Account::ApiKey {},
                 AuthMode::ChatGPT => {
                     let email = auth.get_account_email();
                     let plan_type = auth.account_plan_type();
@@ -2576,6 +2577,7 @@ impl CodexMessageProcessor {
                 effort,
                 summary,
                 final_output_json_schema: None,
+                is_user_turn: false, // app-server 不计入用户主动发送
             })
             .await;
 

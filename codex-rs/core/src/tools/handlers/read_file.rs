@@ -4,8 +4,11 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use codex_utils_string::take_bytes_at_char_boundary;
 use serde::Deserialize;
+use serde::Deserializer;
+use serde_json::Value as JsonValue;
 
 use crate::function_tool::FunctionCallError;
+use crate::shell_utils::parse_json_with_recovery;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
@@ -20,10 +23,40 @@ const TAB_WIDTH: usize = 4;
 // TODO(jif) add support for block comments
 const COMMENT_PREFIXES: &[&str] = &["#", "//", "--"];
 
+/// Deserialize string field, supporting both string and object formats
+fn deserialize_path_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = JsonValue::deserialize(deserializer)?;
+
+    match value {
+        JsonValue::String(s) => Ok(s),
+        JsonValue::Object(obj) => {
+            let s = obj.get("file_path")
+                .or_else(|| obj.get("path"))
+                .or_else(|| obj.get("value"))
+                .or_else(|| obj.get("file"))
+                .or_else(|| obj.get("name"));
+
+            match s {
+                Some(JsonValue::String(s)) => Ok(s.clone()),
+                _ => Err(serde::de::Error::custom(
+                    "expected string value in object"
+                ))
+            }
+        }
+        _ => Err(serde::de::Error::custom(
+            "expected string or object containing string"
+        ))
+    }
+}
+
 /// JSON arguments accepted by the `read_file` tool handler.
 #[derive(Deserialize)]
 struct ReadFileArgs {
     /// Absolute path to the file that will be read.
+    #[serde(deserialize_with = "deserialize_path_string")]
     file_path: String,
     /// 1-indexed line number to start reading from; defaults to 1.
     #[serde(default = "defaults::offset")]
@@ -107,7 +140,7 @@ impl ToolHandler for ReadFileHandler {
             }
         };
 
-        let args: ReadFileArgs = serde_json::from_str(&arguments).map_err(|err| {
+        let args: ReadFileArgs = parse_json_with_recovery(&arguments).map_err(|err| {
             FunctionCallError::RespondToModel(format!(
                 "failed to parse function arguments: {err:?}"
             ))

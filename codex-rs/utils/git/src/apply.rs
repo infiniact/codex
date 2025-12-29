@@ -193,8 +193,14 @@ fn render_command_for_log(cwd: &Path, git_cfg: &[String], args: &[String]) -> St
 /// Collect every path referenced by the diff headers inside `diff --git` sections.
 pub fn extract_paths_from_patch(diff_text: &str) -> Vec<String> {
     static RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?m)^diff --git a/(.*?) b/(.*)$")
-            .unwrap_or_else(|e| panic!("invalid regex: {e}"))
+        Regex::new(r"(?m)^diff --git a/(.*?) b/(.*)$").unwrap_or_else(|e| {
+            eprintln!("[codex-git] Failed to compile diff regex: {e}");
+            // 返回一个永远不匹配的正则表达式，避免 panic 导致 Lazy 被污染
+            Regex::new(r"^\x00$").unwrap_or_else(|_| {
+                // 如果连后备正则也失败了（几乎不可能），返回一个空正则
+                Regex::new("").unwrap_or_else(|_| panic!("unreachable: empty regex should compile"))
+            })
+        })
     });
     let mut set = std::collections::BTreeSet::new();
     for caps in RE.captures_iter(diff_text) {
@@ -486,8 +492,26 @@ pub fn parse_git_apply_output(
     )
 }
 
+/// 创建不区分大小写的正则表达式。
+///
+/// 注意：所有正则表达式模式都是硬编码的，在编译时应该是有效的。
+/// 如果这里失败，说明是编程错误。
+///
+/// 为了避免在 `Lazy` 初始化时 panic 导致 "poisoned" 状态，
+/// 我们返回一个永远不匹配的正则表达式作为后备。
 fn regex_ci(pat: &str) -> Regex {
-    Regex::new(&format!("(?i){pat}")).unwrap_or_else(|e| panic!("invalid regex: {e}"))
+    match Regex::new(&format!("(?i){pat}")) {
+        Ok(re) => re,
+        Err(e) => {
+            // 记录错误但不 panic，返回一个永远不匹配的正则表达式
+            eprintln!("[codex-git] Failed to compile regex pattern '{pat}': {e}");
+            // 使用一个永远不会匹配任何输入的正则表达式作为后备
+            // 这比 panic 更安全，因为不会导致 Lazy 被污染
+            Regex::new(r"^\x00$").unwrap_or_else(|_| {
+                Regex::new("").unwrap_or_else(|_| panic!("unreachable: empty regex should compile"))
+            })
+        }
+    }
 }
 
 #[cfg(test)]

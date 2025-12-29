@@ -138,6 +138,7 @@ pub(crate) async fn assess_command(
         top_k: None,
         top_p: None,
         repetition_penalty: None,
+        is_user_turn: false, // sandbox assessment 是系统自动操作
     };
 
     let model_family = models_manager

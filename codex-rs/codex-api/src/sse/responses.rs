@@ -41,7 +41,7 @@ pub fn stream_from_fixture(
 
     let reader = std::io::Cursor::new(content);
     let stream = ReaderStream::new(reader).map_err(|err| TransportError::Network(err.to_string()));
-    let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent, ApiError>>(1600);
+    let (tx_event, rx_event) = mpsc::unbounded_channel::<Result<ResponseEvent, ApiError>>();
     tokio::spawn(process_sse(Box::pin(stream), tx_event, idle_timeout, None));
     Ok(ResponseStream { rx_event })
 }
@@ -52,10 +52,10 @@ pub fn spawn_response_stream(
     telemetry: Option<Arc<dyn SseTelemetry>>,
 ) -> ResponseStream {
     let rate_limits = parse_rate_limit(&stream_response.headers);
-    let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent, ApiError>>(1600);
+    let (tx_event, rx_event) = mpsc::unbounded_channel::<Result<ResponseEvent, ApiError>>();
     tokio::spawn(async move {
         if let Some(snapshot) = rate_limits {
-            let _ = tx_event.send(Ok(ResponseEvent::RateLimits(snapshot))).await;
+            let _ = tx_event.send(Ok(ResponseEvent::RateLimits(snapshot)));
         }
         process_sse(stream_response.bytes, tx_event, idle_timeout, telemetry).await;
     });
@@ -131,7 +131,7 @@ struct SseEvent {
 
 pub async fn process_sse(
     stream: ByteStream,
-    tx_event: mpsc::Sender<Result<ResponseEvent, ApiError>>,
+    tx_event: mpsc::UnboundedSender<Result<ResponseEvent, ApiError>>,
     idle_timeout: Duration,
     telemetry: Option<Arc<dyn SseTelemetry>>,
 ) {
@@ -152,7 +152,7 @@ pub async fn process_sse(
             Ok(Some(Ok(sse))) => sse,
             Ok(Some(Err(e))) => {
                 debug!("❌ [process_sse] SSE 错误: {e:#}");
-                let _ = tx_event.send(Err(ApiError::Stream(e.to_string()))).await;
+                let _ = tx_event.send(Err(ApiError::Stream(e.to_string())));
                 return;
             }
             Ok(None) => {
@@ -171,23 +171,21 @@ pub async fn process_sse(
                             response_id: id,
                             token_usage: usage.map(Into::into),
                         };
-                        let _ = tx_event.send(Ok(event)).await;
+                        let _ = tx_event.send(Ok(event));
                     }
                     None => {
                         let error = response_error.unwrap_or(ApiError::Stream(
                             "stream closed before response.completed".into(),
                         ));
                         warn!("⚠️ [process_sse] 流意外结束: {:?}", error);
-                        let _ = tx_event.send(Err(error)).await;
+                        let _ = tx_event.send(Err(error));
                     }
                 }
                 return;
             }
             Err(_) => {
                 warn!("⚠️ [process_sse] SSE 空闲超时");
-                let _ = tx_event
-                    .send(Err(ApiError::Stream("idle timeout waiting for SSE".into())))
-                    .await;
+                let _ = tx_event.send(Err(ApiError::Stream("idle timeout waiting for SSE".into())));
                 return;
             }
         };
@@ -313,7 +311,7 @@ pub async fn process_sse(
                 debug!("📥 [process_sse] output_item.done: {}", item_summary);
 
                 let event = ResponseEvent::OutputItemDone(item);
-                if tx_event.send(Ok(event)).await.is_err() {
+                if tx_event.send(Ok(event)).is_err() {
                     return;
                 }
             }
@@ -328,7 +326,7 @@ pub async fn process_sse(
                     trace!("📥 [process_sse] output_text.delta: {delta_preview}");
 
                     let event = ResponseEvent::OutputTextDelta(delta);
-                    if tx_event.send(Ok(event)).await.is_err() {
+                    if tx_event.send(Ok(event)).is_err() {
                         return;
                     }
                 }
@@ -342,7 +340,7 @@ pub async fn process_sse(
                         delta,
                         summary_index,
                     };
-                    if tx_event.send(Ok(event)).await.is_err() {
+                    if tx_event.send(Ok(event)).is_err() {
                         return;
                     }
                 }
@@ -356,7 +354,7 @@ pub async fn process_sse(
                         delta,
                         content_index,
                     };
-                    if tx_event.send(Ok(event)).await.is_err() {
+                    if tx_event.send(Ok(event)).is_err() {
                         return;
                     }
                 }
@@ -364,7 +362,7 @@ pub async fn process_sse(
             "response.created" => {
                 if event.response.is_some() {
                     debug!("📥 [process_sse] response.created");
-                    let _ = tx_event.send(Ok(ResponseEvent::Created {})).await;
+                    let _ = tx_event.send(Ok(ResponseEvent::Created {}));
                 }
             }
             "response.failed" => {
@@ -433,7 +431,7 @@ pub async fn process_sse(
                 );
 
                 let event = ResponseEvent::OutputItemAdded(item);
-                if tx_event.send(Ok(event)).await.is_err() {
+                if tx_event.send(Ok(event)).is_err() {
                     return;
                 }
             }
@@ -441,7 +439,7 @@ pub async fn process_sse(
                 if let Some(summary_index) = event.summary_index {
                     debug!("📥 [process_sse] reasoning_summary_part.added[{}]", summary_index);
                     let event = ResponseEvent::ReasoningSummaryPartAdded { summary_index };
-                    if tx_event.send(Ok(event)).await.is_err() {
+                    if tx_event.send(Ok(event)).is_err() {
                         return;
                     }
                 }
@@ -519,7 +517,7 @@ mod tests {
         let reader = builder.build();
         let stream =
             ReaderStream::new(reader).map_err(|err| TransportError::Network(err.to_string()));
-        let (tx, mut rx) = mpsc::channel::<Result<ResponseEvent, ApiError>>(16);
+        let (tx, mut rx) = mpsc::unbounded_channel::<Result<ResponseEvent, ApiError>>();
         tokio::spawn(process_sse(Box::pin(stream), tx, idle_timeout(), None));
 
         let mut events = Vec::new();
@@ -543,7 +541,7 @@ mod tests {
             }
         }
 
-        let (tx, mut rx) = mpsc::channel::<Result<ResponseEvent, ApiError>>(8);
+        let (tx, mut rx) = mpsc::unbounded_channel::<Result<ResponseEvent, ApiError>>();
         let stream = ReaderStream::new(std::io::Cursor::new(body))
             .map_err(|err| TransportError::Network(err.to_string()));
         tokio::spawn(process_sse(Box::pin(stream), tx, idle_timeout(), None));

@@ -1,6 +1,8 @@
 //! Session-wide mutable state.
 
 use codex_protocol::models::ResponseItem;
+use codex_protocol::plan_tool::StepStatus;
+use codex_protocol::plan_tool::UpdatePlanArgs;
 
 use crate::codex::SessionConfiguration;
 use crate::context_manager::ContextManager;
@@ -14,6 +16,8 @@ pub(crate) struct SessionState {
     pub(crate) session_configuration: SessionConfiguration,
     pub(crate) history: ContextManager,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
+    /// 当前活跃的任务计划，用于在 compact 后恢复
+    pub(crate) current_plan: Option<UpdatePlanArgs>,
 }
 
 impl SessionState {
@@ -24,7 +28,21 @@ impl SessionState {
             session_configuration,
             history,
             latest_rate_limits: None,
+            current_plan: None,
         }
+    }
+
+    // Plan management helpers
+    pub(crate) fn set_current_plan(&mut self, plan: UpdatePlanArgs) {
+        self.current_plan = Some(plan);
+    }
+
+    pub(crate) fn get_current_plan(&self) -> Option<&UpdatePlanArgs> {
+        self.current_plan.as_ref()
+    }
+
+    pub(crate) fn clear_current_plan(&mut self) {
+        self.current_plan = None;
     }
 
     // History helpers
@@ -80,6 +98,92 @@ impl SessionState {
 
     pub(crate) fn get_total_token_usage(&self) -> i64 {
         self.history.get_total_token_usage()
+    }
+
+    
+    /// 获取缓存的 token 数量
+    pub(crate) fn get_cached_token_usage(&self) -> i64 {
+        self.history.get_cached_token_usage()
+    }
+
+    /// 获取最近一次请求的 token 使用量
+    pub(crate) fn get_last_token_usage(&self) -> i64 {
+        self.history.get_last_token_usage()
+    }
+
+    /// 判断当前是否处于逻辑单元边界，适合进行 compact
+    ///
+    /// 逻辑单元边界的定义：
+    /// 1. 如果有活跃的 Plan，检查是否有 in_progress 的步骤
+    ///    - 有 in_progress 步骤 = 不在边界（正在执行任务）
+    ///    - 没有 in_progress 步骤 = 在边界（步骤间隙）
+    /// 2. 如果没有 Plan，默认认为在边界
+    ///
+    /// 返回值：
+    /// - `true`: 当前处于逻辑单元边界，可以安全 compact
+    /// - `false`: 当前在逻辑单元内部，不建议 compact
+    pub(crate) fn is_at_logical_unit_boundary(&self) -> bool {
+        match &self.current_plan {
+            Some(plan) => {
+                // 检查是否有 in_progress 的步骤
+                let has_in_progress = plan
+                    .plan
+                    .iter()
+                    .any(|step| matches!(step.status, StepStatus::InProgress));
+
+                // 如果没有 in_progress 步骤，则处于边界
+                !has_in_progress
+            }
+            None => {
+                // 没有 Plan 时，默认认为在边界
+                true
+            }
+        }
+    }
+
+    /// 获取当前 Plan 的进度信息，用于日志记录
+    pub(crate) fn get_plan_progress(&self) -> Option<PlanProgress> {
+        self.current_plan.as_ref().map(|plan| {
+            let total = plan.plan.len();
+            let completed = plan
+                .plan
+                .iter()
+                .filter(|s| matches!(s.status, StepStatus::Completed))
+                .count();
+            let in_progress = plan
+                .plan
+                .iter()
+                .filter(|s| matches!(s.status, StepStatus::InProgress))
+                .count();
+            let pending = plan
+                .plan
+                .iter()
+                .filter(|s| matches!(s.status, StepStatus::Pending))
+                .count();
+
+            PlanProgress {
+                total,
+                completed,
+                in_progress,
+                pending,
+            }
+        })
+    }
+}
+
+/// Plan 进度信息
+#[derive(Debug, Clone)]
+pub(crate) struct PlanProgress {
+    pub total: usize,
+    pub completed: usize,
+    pub in_progress: usize,
+    pub pending: usize,
+}
+
+impl PlanProgress {
+    /// 检查是否有未完成的步骤
+    pub fn has_incomplete_steps(&self) -> bool {
+        self.in_progress > 0 || self.pending > 0
     }
 }
 

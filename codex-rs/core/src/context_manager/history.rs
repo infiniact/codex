@@ -199,7 +199,25 @@ impl ContextManager {
     pub(crate) fn get_total_token_usage(&self) -> i64 {
         self.token_info
             .as_ref()
-            .map(|info| info.total_token_usage.total_tokens)  // 使用累计的 total_token_usage
+            .map(|info| info.last_token_usage.total_tokens)  // 使用 last_token_usage，compact 后反映实际上下文大小
+            .unwrap_or(0)
+            .saturating_add(self.get_non_last_reasoning_items_tokens() as i64)
+    }
+
+    
+    /// 获取缓存的 token 数量
+    pub(crate) fn get_cached_token_usage(&self) -> i64 {
+        self.token_info
+            .as_ref()
+            .map(|info| info.last_token_usage.cached_input_tokens)  // 使用 last_token_usage
+            .unwrap_or(0)
+    }
+
+    /// 获取最近一次请求的 token 使用量
+    pub(crate) fn get_last_token_usage(&self) -> i64 {
+        self.token_info
+            .as_ref()
+            .map(|info| info.last_token_usage.total_tokens)
             .unwrap_or(0)
             .saturating_add(self.get_non_last_reasoning_items_tokens() as i64)
     }

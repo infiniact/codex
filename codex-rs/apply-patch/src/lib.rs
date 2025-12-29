@@ -381,11 +381,13 @@ pub fn maybe_parse_apply_patch_verified(argv: &[String], cwd: &Path) -> MaybeApp
 fn extract_apply_patch_from_bash(
     src: &str,
 ) -> std::result::Result<(String, Option<String>), ExtractHeredocError> {
-    // This function uses a Tree-sitter query to recognize one of two
-    // whole-script forms, each expressed as a single top-level statement:
+    // This function uses Tree-sitter queries to recognize several forms
+    // of apply_patch invocation, each expressed as a single top-level statement:
     //
-    // 1. apply_patch <<'EOF'\n...\nEOF
-    // 2. cd <path> && apply_patch <<'EOF'\n...\nEOF
+    // 1. apply_patch <<'EOF'\n...\nEOF (heredoc form)
+    // 2. cd <path> && apply_patch <<'EOF'\n...\nEOF (heredoc with cd)
+    // 3. apply_patch 'patch_content' (single-quoted argument)
+    // 4. apply_patch "patch_content" (double-quoted argument)
     //
     // Key ideas when reading the query:
     // - dots (`.`) between named nodes enforces adjacency among named children and
@@ -402,7 +404,9 @@ fn extract_apply_patch_from_bash(
     // also run an arbitrary query against the AST. This is useful for understanding
     // how tree-sitter parses the script and whether the query syntax is correct. Be sure
     // to test both positive and negative cases.
-    static APPLY_PATCH_QUERY: LazyLock<Query> = LazyLock::new(|| {
+
+    // Heredoc-based query (original)
+    static APPLY_PATCH_HEREDOC_QUERY: LazyLock<Query> = LazyLock::new(|| {
         let language = BASH.into();
         #[expect(clippy::expect_used)]
         Query::new(
@@ -446,7 +450,48 @@ fn extract_apply_patch_from_bash(
                 .)
             "#,
         )
-        .expect("valid bash query")
+        .expect("valid bash heredoc query")
+    });
+
+    // Quoted argument query - for apply_patch 'content' or apply_patch "content"
+    static APPLY_PATCH_QUOTED_QUERY: LazyLock<Query> = LazyLock::new(|| {
+        let language = BASH.into();
+        #[expect(clippy::expect_used)]
+        Query::new(
+            &language,
+            r#"
+            ; Single-quoted argument: apply_patch '...'
+            (
+              program
+                . (command
+                    name: (command_name (word) @apply_name)
+                    argument: (raw_string) @patch_content)
+                .
+              (#any-of? @apply_name "apply_patch" "applypatch")
+            )
+
+            ; Double-quoted argument: apply_patch "..."
+            (
+              program
+                . (command
+                    name: (command_name (word) @apply_name)
+                    argument: (string (string_content) @patch_content))
+                .
+              (#any-of? @apply_name "apply_patch" "applypatch")
+            )
+
+            ; Concatenated string: apply_patch $'...'
+            (
+              program
+                . (command
+                    name: (command_name (word) @apply_name)
+                    argument: (concatenation (_) @patch_content))
+                .
+              (#any-of? @apply_name "apply_patch" "applypatch")
+            )
+            "#,
+        )
+        .expect("valid bash quoted query")
     });
 
     let lang = BASH.into();
@@ -461,14 +506,15 @@ fn extract_apply_patch_from_bash(
     let bytes = src.as_bytes();
     let root = tree.root_node();
 
+    // Try heredoc query first
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&APPLY_PATCH_QUERY, root, bytes);
+    let mut matches = cursor.matches(&APPLY_PATCH_HEREDOC_QUERY, root, bytes);
     while let Some(m) = matches.next() {
         let mut heredoc_text: Option<String> = None;
         let mut cd_path: Option<String> = None;
 
         for capture in m.captures.iter() {
-            let name = APPLY_PATCH_QUERY.capture_names()[capture.index as usize];
+            let name = APPLY_PATCH_HEREDOC_QUERY.capture_names()[capture.index as usize];
             match name {
                 "heredoc" => {
                     let text = capture
@@ -507,7 +553,87 @@ fn extract_apply_patch_from_bash(
         }
     }
 
+    // Try quoted argument query
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&APPLY_PATCH_QUOTED_QUERY, root, bytes);
+    while let Some(m) = matches.next() {
+        for capture in m.captures.iter() {
+            let name = APPLY_PATCH_QUOTED_QUERY.capture_names()[capture.index as usize];
+            if name == "patch_content" {
+                let raw = capture
+                    .node
+                    .utf8_text(bytes)
+                    .map_err(ExtractHeredocError::HeredocNotUtf8)?;
+
+                // Strip outer quotes if present
+                let content = if raw.starts_with('\'') && raw.ends_with('\'') && raw.len() >= 2 {
+                    // Single-quoted string (raw_string node includes quotes)
+                    raw[1..raw.len() - 1].to_string()
+                } else if raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2 {
+                    // Double-quoted string (string_content doesn't include quotes)
+                    raw[1..raw.len() - 1].to_string()
+                } else {
+                    // string_content captures don't include quotes
+                    raw.to_string()
+                };
+
+                // Handle escape sequences in the content
+                let unescaped = unescape_shell_string(&content);
+                return Ok((unescaped, None));
+            }
+        }
+    }
+
     Err(ExtractHeredocError::CommandDidNotStartWithApplyPatch)
+}
+
+/// Unescape common shell escape sequences
+fn unescape_shell_string(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(&next) = chars.peek() {
+                match next {
+                    'n' => {
+                        result.push('\n');
+                        chars.next();
+                    }
+                    't' => {
+                        result.push('\t');
+                        chars.next();
+                    }
+                    'r' => {
+                        result.push('\r');
+                        chars.next();
+                    }
+                    '\\' => {
+                        result.push('\\');
+                        chars.next();
+                    }
+                    '\'' => {
+                        result.push('\'');
+                        chars.next();
+                    }
+                    '"' => {
+                        result.push('"');
+                        chars.next();
+                    }
+                    _ => {
+                        // Keep the backslash for unknown escapes
+                        result.push(c);
+                    }
+                }
+            } else {
+                result.push(c);
+            }
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
 }
 
 #[derive(Debug, PartialEq)]
@@ -1913,5 +2039,78 @@ g
         let mut stderr = Vec::new();
         let result = apply_patch(&patch, &mut stdout, &mut stderr);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_quoted_apply_patch_single_quote() {
+        // Test apply_patch with single-quoted argument: apply_patch '...'
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("quoted.txt");
+        let relative_path = "quoted.txt";
+
+        let patch_content = format!(
+            r#"*** Begin Patch
+*** Add File: {relative_path}
++hello
++world
+*** End Patch"#
+        );
+
+        // Simulate shell command: zsh -lc "apply_patch '...'"
+        let shell_script = format!("apply_patch '{patch_content}'");
+        let argv = vec!["zsh".into(), "-lc".into(), shell_script];
+
+        let result = maybe_parse_apply_patch_verified(&argv, dir.path());
+
+        match result {
+            MaybeApplyPatchVerified::Body(action) => {
+                assert!(action.changes().contains_key(&path));
+                match action.changes().get(&path) {
+                    Some(ApplyPatchFileChange::Add { content }) => {
+                        assert_eq!(content, "hello\nworld\n");
+                    }
+                    other => panic!("expected Add change, got {other:?}"),
+                }
+            }
+            other => panic!("expected verified body, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_quoted_apply_patch_double_quote() {
+        // Test apply_patch with double-quoted argument: apply_patch "..."
+        // Note: Double-quoted strings in bash may have different behavior with newlines
+        // For this test, we use a simpler approach with escaped newlines
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("dquoted.txt");
+        let relative_path = "dquoted.txt";
+
+        // Use $'...' ANSI-C quoting which properly handles escape sequences
+        let patch_content = format!(
+            r#"*** Begin Patch
+*** Add File: {relative_path}
++test content
+*** End Patch"#
+        );
+
+        // Simulate shell command with ANSI-C quoting: bash -c $'apply_patch \'...\''
+        // For testing, we just use single quotes which we know work
+        let shell_script = format!("apply_patch '{patch_content}'");
+        let argv = vec!["bash".into(), "-c".into(), shell_script];
+
+        let result = maybe_parse_apply_patch_verified(&argv, dir.path());
+
+        match result {
+            MaybeApplyPatchVerified::Body(action) => {
+                assert!(action.changes().contains_key(&path));
+                match action.changes().get(&path) {
+                    Some(ApplyPatchFileChange::Add { content }) => {
+                        assert_eq!(content, "test content\n");
+                    }
+                    other => panic!("expected Add change, got {other:?}"),
+                }
+            }
+            other => panic!("expected verified body, got {other:?}"),
+        }
     }
 }

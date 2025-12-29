@@ -7,6 +7,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::function_tool::FunctionCallError;
+use crate::shell_utils::parse_json_with_recovery;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
@@ -52,7 +53,7 @@ impl ToolHandler for GrepFilesHandler {
             }
         };
 
-        let args: GrepFilesArgs = serde_json::from_str(&arguments).map_err(|err| {
+        let args: GrepFilesArgs = parse_json_with_recovery(&arguments).map_err(|err| {
             FunctionCallError::RespondToModel(format!(
                 "failed to parse function arguments: {err:?}"
             ))

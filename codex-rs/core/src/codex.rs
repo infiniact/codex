@@ -358,6 +358,8 @@ pub(crate) struct TurnContext {
     pub(crate) tool_call_gate: Arc<ReadinessFlag>,
     pub(crate) exec_policy: Arc<RwLock<ExecPolicy>>,
     pub(crate) truncation_policy: TruncationPolicy,
+    /// 是否为用户主动发送的消息（用于服务端统计 turn_count）
+    pub(crate) is_user_turn: bool,
 }
 
 impl TurnContext {
@@ -454,6 +456,9 @@ pub(crate) struct SessionSettingsUpdate {
     pub(crate) reasoning_effort: Option<Option<ReasoningEffortConfig>>,
     pub(crate) reasoning_summary: Option<ReasoningSummaryConfig>,
     pub(crate) final_output_json_schema: Option<Option<Value>>,
+    /// 是否为用户主动发送的消息（用于服务端统计 turn_count）
+    /// None 默认为 true
+    pub(crate) is_user_turn: Option<bool>,
 }
 
 impl Session {
@@ -482,6 +487,7 @@ impl Session {
         model_family: ModelFamily,
         conversation_id: ConversationId,
         sub_id: String,
+        is_user_turn: bool,
     ) -> TurnContext {
         let otel_event_manager = otel_event_manager.clone().with_model(
             session_configuration.model.as_str(),
@@ -526,6 +532,7 @@ impl Session {
                 per_turn_config.as_ref(),
                 model_family.truncation_policy,
             ),
+            is_user_turn,
         }
     }
 
@@ -760,6 +767,31 @@ impl Session {
         state.get_total_token_usage()
     }
 
+    /// 获取最近一次请求的 token 使用量（用于 compact 判断）
+    pub(crate) async fn get_last_token_usage(&self) -> i64 {
+        let state = self.state.lock().await;
+        state.get_last_token_usage()
+    }
+
+    
+    /// 获取缓存的 token 数量
+    async fn get_cached_token_usage(&self) -> i64 {
+        let state = self.state.lock().await;
+        state.get_cached_token_usage()
+    }
+
+    /// 判断当前是否处于逻辑单元边界，适合进行 compact
+    pub(crate) async fn is_at_logical_unit_boundary(&self) -> bool {
+        let state = self.state.lock().await;
+        state.is_at_logical_unit_boundary()
+    }
+
+    /// 获取当前 Plan 的进度信息
+    pub(crate) async fn get_plan_progress(&self) -> Option<crate::state::PlanProgress> {
+        let state = self.state.lock().await;
+        state.get_plan_progress()
+    }
+
     async fn record_initial_history(&self, conversation_history: InitialHistory) {
         let turn_context = self.new_turn(SessionSettingsUpdate::default()).await;
         match conversation_history {
@@ -839,6 +871,9 @@ impl Session {
         // Reset MCP call tracker at the start of each turn
         self.reset_mcp_call_tracker().await;
 
+        // 获取 is_user_turn，默认为 false（只有明确设置为 true 时才计入用户统计）
+        let is_user_turn = updates.is_user_turn.unwrap_or(false);
+
         let session_configuration = {
             let mut state = self.state.lock().await;
             let session_configuration = state.session_configuration.clone().apply(&updates);
@@ -861,6 +896,7 @@ impl Session {
             model_family,
             self.conversation_id,
             sub_id,
+            is_user_turn,
         );
         if let Some(final_schema) = updates.final_output_json_schema {
             turn_context.final_output_json_schema = final_schema;
@@ -1320,6 +1356,22 @@ impl Session {
         state.clone_history()
     }
 
+    // Plan state management methods
+    pub(crate) async fn set_current_plan(&self, plan: codex_protocol::plan_tool::UpdatePlanArgs) {
+        let mut state = self.state.lock().await;
+        state.set_current_plan(plan);
+    }
+
+    pub(crate) async fn get_current_plan(&self) -> Option<codex_protocol::plan_tool::UpdatePlanArgs> {
+        let state = self.state.lock().await;
+        state.get_current_plan().cloned()
+    }
+
+    pub(crate) async fn clear_current_plan(&self) {
+        let mut state = self.state.lock().await;
+        state.clear_current_plan();
+    }
+
     pub(crate) async fn update_token_usage_info(
         &self,
         turn_context: &TurnContext,
@@ -1645,11 +1697,11 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                 handlers::user_input_or_turn(&sess, sub.id.clone(), sub.op, &mut previous_context)
                     .await;
             }
-            Op::ExecApproval { id, decision } => {
-                handlers::exec_approval(&sess, id, decision).await;
+            Op::ExecApproval { id, decision, custom_message } => {
+                handlers::exec_approval(&sess, id, decision, custom_message).await;
             }
-            Op::PatchApproval { id, decision } => {
-                handlers::patch_approval(&sess, id, decision).await;
+            Op::PatchApproval { id, decision, custom_message } => {
+                handlers::patch_approval(&sess, id, decision, custom_message).await;
             }
             Op::AddToHistory { text } => {
                 handlers::add_to_history(&sess, &config, text).await;
@@ -1705,6 +1757,7 @@ mod handlers {
     use crate::codex::Session;
     use crate::codex::SessionSettingsUpdate;
     use crate::codex::TurnContext;
+    use uuid::Uuid;
 
     use crate::codex::spawn_review_thread;
     use crate::config::Config;
@@ -1718,6 +1771,7 @@ mod handlers {
     use codex_protocol::custom_prompts::CustomPrompt;
     use codex_protocol::models::ContentItem;
     use codex_protocol::models::ResponseItem;
+    use codex_protocol::protocol::BackgroundEventEvent;
     use codex_protocol::protocol::CodexErrorInfo;
     use codex_protocol::protocol::ErrorEvent;
     use codex_protocol::protocol::Event;
@@ -1761,6 +1815,7 @@ mod handlers {
                 summary,
                 final_output_json_schema,
                 items,
+                is_user_turn,
             } => (
                 items,
                 SessionSettingsUpdate {
@@ -1771,13 +1826,17 @@ mod handlers {
                     reasoning_effort: Some(effort),
                     reasoning_summary: Some(summary),
                     final_output_json_schema: Some(final_output_json_schema),
+                    is_user_turn: Some(is_user_turn),
                 },
             ),
-            Op::UserInput { items } => (items, SessionSettingsUpdate::default()),
+            Op::UserInput { items } => (items, SessionSettingsUpdate {
+                is_user_turn: Some(false), // Op::UserInput 默认为系统发送
+                ..Default::default()
+            }),
             _ => unreachable!(),
         };
 
-        let current_context = sess.new_turn_with_sub_id(sub_id, updates).await;
+        let current_context = sess.new_turn_with_sub_id(sub_id.clone(), updates).await;
         current_context
             .client
             .get_otel_event_manager()
@@ -1788,28 +1847,47 @@ mod handlers {
         if let Err(items) = sess.inject_input(items).await {
             tracing::warn!("🔍 [user_input_or_turn] inject_input 返回 Err，没有活跃任务");
 
-            // 🔄 会话不活跃时，提取历史摘要并添加到对话上下文
-            let history = sess.clone_history().await.get_history();
-            tracing::warn!("📊 [user_input_or_turn] 历史记录条数: {}", history.len());
+            // 🔧 检查是否有未完成的 plan
+            let plan_progress = sess.get_plan_progress().await;
+            if let Some(ref progress) = plan_progress
+                && progress.has_incomplete_steps()
+            {
+                tracing::warn!(
+                    "📋 [user_input_or_turn] 检测到未完成的 plan: {}/{} completed, {} in_progress, {} pending",
+                    progress.completed, progress.total, progress.in_progress, progress.pending
+                );
 
-            let history_summary = extract_recent_history_summary(&history, 3);
-            tracing::warn!("📊 [user_input_or_turn] 提取的摘要对数: {}", history_summary.len());
+                // 获取当前 plan 详情
+                if let Some(plan) = sess.get_current_plan().await {
+                    // 构建 plan 状态描述
+                    let plan_steps: Vec<String> = plan.plan.iter().map(|step| {
+                        let status_emoji = match step.status {
+                            codex_protocol::plan_tool::StepStatus::Completed => "✅",
+                            codex_protocol::plan_tool::StepStatus::InProgress => "🔄",
+                            codex_protocol::plan_tool::StepStatus::Pending => "⏳",
+                        };
+                        format!("{} {}", status_emoji, step.step)
+                    }).collect();
 
-            if !history_summary.is_empty() {
-                tracing::warn!("📋 [user_input_or_turn] 提取了 {} 条历史摘要", history_summary.len());
-                // 将历史摘要作为系统消息添加到对话上下文
-                let summary_text = format_history_summary(&history_summary);
-                tracing::warn!("📝 [user_input_or_turn] 摘要文本长度: {} 字符", summary_text.len());
-                let summary_item = ResponseItem::Message {
-                    id: None,
-                    role: "user".to_string(),
-                    content: vec![ContentItem::InputText { text: summary_text }],
-                };
-                sess.record_conversation_items(&current_context, std::slice::from_ref(&summary_item))
-                    .await;
-                tracing::warn!("✅ [user_input_or_turn] 历史摘要已添加到对话上下文");
-            } else {
-                tracing::warn!("⚠️ [user_input_or_turn] 没有提取到历史摘要");
+                    let plan_reminder = format!(
+                        "<system-reminder>\nYou have an incomplete plan from a previous task with {} steps ({} completed, {} in progress, {} pending).\n\nPrevious plan status:\n{}\n\nThe user has provided new input. Please decide:\n1. If the new input is related to the existing plan, continue executing the remaining steps.\n2. If the new input is a completely different task, you may start fresh (but consider if the old plan should be abandoned).\n3. If unclear, ask the user whether they want to continue the previous plan or start a new task.\n</system-reminder>",
+                        plan.plan.len(),
+                        progress.completed,
+                        progress.in_progress,
+                        progress.pending,
+                        plan_steps.join("\n")
+                    );
+
+                    let reminder_message = ResponseItem::Message {
+                        id: None,
+                        role: "user".to_string(),
+                        content: vec![ContentItem::InputText { text: plan_reminder }],
+                    };
+                    sess.record_conversation_items(&current_context, std::slice::from_ref(&reminder_message))
+                        .await;
+
+                    tracing::info!("📋 [user_input_or_turn] 已注入未完成 plan 的提醒");
+                }
             }
 
             if let Some(env_item) =
@@ -1825,87 +1903,16 @@ mod handlers {
             *previous_context = Some(current_context);
         } else {
             tracing::warn!("✅ [user_input_or_turn] inject_input 返回 Ok，输入已注入现有任务");
+            // 🆕 发送事件通知前端：输入已排队等待处理
+            // 使用 send_event_raw 因为我们没有活跃任务的 turn_context
+            let event = Event {
+                id: sub_id,
+                msg: EventMsg::BackgroundEvent(BackgroundEventEvent {
+                    message: "输入已排队，将在当前任务完成后处理".to_string(),
+                }),
+            };
+            sess.send_event_raw(event).await;
         }
-    }
-
-    /// 从历史记录中提取最近的用户和助手消息摘要
-    ///
-    /// 返回最后 n 对用户/助手消息的摘要信息
-    fn extract_recent_history_summary(history: &[ResponseItem], max_pairs: usize) -> Vec<(String, String)> {
-        let mut summaries: Vec<(String, String)> = Vec::new();
-        let mut pending_assistant_msg: Option<String> = None;
-
-        tracing::warn!("🔍 [extract_recent_history_summary] 开始提取，历史条数: {}, max_pairs: {}", history.len(), max_pairs);
-
-        // 从后往前遍历历史，收集用户-助手消息对
-        // 逻辑：先找到 assistant 消息，然后向前找对应的 user 消息
-        for (idx, item) in history.iter().rev().enumerate() {
-            if let ResponseItem::Message { role, content, .. } = item {
-                let text = content.iter()
-                    .filter_map(|c| match c {
-                        ContentItem::OutputText { text } => Some(text.clone()),
-                        ContentItem::InputText { text } => Some(text.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-
-                // 安全截断：使用 char_indices 避免 UTF-8 边界问题
-                let truncated = if text.chars().count() > 500 {
-                    let end_idx = text.char_indices()
-                        .nth(500)
-                        .map(|(i, _)| i)
-                        .unwrap_or(text.len());
-                    format!("{}...", &text[..end_idx])
-                } else {
-                    text.clone()
-                };
-
-                tracing::warn!("🔍 [extract] idx={}, role={}, text_len={}", idx, role, text.len());
-
-                if role == "assistant" && pending_assistant_msg.is_none() {
-                    // 找到助手消息，等待对应的用户消息
-                    pending_assistant_msg = Some(truncated);
-                    tracing::warn!("📝 [extract] 找到 assistant 消息，等待 user 消息配对");
-                } else if role == "user" && pending_assistant_msg.is_some() {
-                    // 找到用户消息，配对完成
-                    if let Some(assistant_msg) = pending_assistant_msg.take() {
-                        summaries.push((truncated, assistant_msg));
-                    }
-                    tracing::warn!("✅ [extract] 配对成功，当前摘要数: {}", summaries.len());
-                    if summaries.len() >= max_pairs {
-                        break;
-                    }
-                }
-            } else {
-                // 非 Message 类型的 ResponseItem
-                tracing::warn!("🔍 [extract] idx={}, 非 Message 类型", idx);
-            }
-        }
-
-        tracing::warn!("📊 [extract_recent_history_summary] 提取完成，摘要对数: {}", summaries.len());
-
-        // 反转顺序，使其按时间顺序排列
-        summaries.reverse();
-        summaries
-    }
-
-    /// 将历史摘要格式化为系统消息
-    fn format_history_summary(summaries: &[(String, String)]) -> String {
-        if summaries.is_empty() {
-            return String::new();
-        }
-
-        let mut result = String::from("<system-reminder>\nThis session is being continued from a previous conversation. Here is a summary of the recent context:\n\n");
-
-        for (i, (user_msg, assistant_msg)) in summaries.iter().enumerate() {
-            result.push_str(&format!("--- Turn {} ---\n", i + 1));
-            result.push_str(&format!("User: {user_msg}\n"));
-            result.push_str(&format!("Assistant: {assistant_msg}\n\n"));
-        }
-
-        result.push_str("Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.\n</system-reminder>");
-        result
     }
 
     pub async fn run_user_shell_command(
@@ -1954,7 +1961,7 @@ mod handlers {
 
     /// Propagate a user's exec approval decision to the session.
     /// Also optionally applies an execpolicy amendment.
-    pub async fn exec_approval(sess: &Arc<Session>, id: String, decision: ReviewDecision) {
+    pub async fn exec_approval(sess: &Arc<Session>, id: String, decision: ReviewDecision, custom_message: Option<String>) {
         if let ReviewDecision::ApprovedExecpolicyAmendment {
             proposed_execpolicy_amendment,
         } = &decision
@@ -1971,6 +1978,36 @@ mod handlers {
             })
             .await;
         }
+
+        // If there's a custom message, send it as user input first
+        if let Some(custom_msg) = &custom_message
+            && !custom_msg.trim().is_empty()
+        {
+            tracing::info!("Processing custom approval message: {}", custom_msg);
+
+            // Create a user input submission with the custom message
+            let user_input = codex_protocol::user_input::UserInput::Text {
+                text: custom_msg.clone(),
+            };
+
+            let input_op = crate::protocol::Op::UserInput {
+                items: vec![user_input],
+            };
+
+            // Submit the user input before sending the approval decision
+            let submission_id = format!("user-input-{}", Uuid::new_v4());
+            let submission = crate::protocol::Submission {
+                id: submission_id.clone(),
+                op: input_op,
+            };
+
+            // Use the existing user input processing mechanism
+            user_input_or_turn(sess, submission_id, submission.op, &mut None).await;
+
+            // Small delay to ensure the input is processed before the approval decision
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+
         match decision {
             ReviewDecision::Abort => {
                 sess.interrupt_task().await;
@@ -1979,7 +2016,36 @@ mod handlers {
         }
     }
 
-    pub async fn patch_approval(sess: &Arc<Session>, id: String, decision: ReviewDecision) {
+    pub async fn patch_approval(sess: &Arc<Session>, id: String, decision: ReviewDecision, custom_message: Option<String>) {
+        // If there's a custom message, send it as user input first
+        if let Some(custom_msg) = &custom_message
+            && !custom_msg.trim().is_empty()
+        {
+            tracing::info!("Processing custom approval message for patch: {}", custom_msg);
+
+            // Create a user input submission with the custom message
+            let user_input = codex_protocol::user_input::UserInput::Text {
+                text: custom_msg.clone(),
+            };
+
+            let input_op = crate::protocol::Op::UserInput {
+                items: vec![user_input],
+            };
+
+            // Submit the user input before sending the approval decision
+            let submission_id = format!("user-input-{}", Uuid::new_v4());
+            let submission = crate::protocol::Submission {
+                id: submission_id.clone(),
+                op: input_op,
+            };
+
+            // Use the existing user input processing mechanism
+            user_input_or_turn(sess, submission_id, submission.op, &mut None).await;
+
+            // Small delay to ensure the input is processed before the approval decision
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+
         match decision {
             ReviewDecision::Abort => {
                 sess.interrupt_task().await;
@@ -2238,6 +2304,7 @@ async fn spawn_review_thread(
         tool_call_gate: Arc::new(ReadinessFlag::new()),
         exec_policy: parent_turn_context.exec_policy.clone(),
         truncation_policy: TruncationPolicy::new(&per_turn_config, model_family.truncation_policy),
+        is_user_turn: false, // review 是系统自动发起的
     };
 
     // Seed the child task with the review prompt as the initial user message.
@@ -2292,7 +2359,7 @@ pub(crate) async fn run_task(
         .map(|limit| (limit * 80) / 100) // 使用 80% 作为预防性阈值
         .unwrap_or(i64::MAX);
 
-    let current_tokens = sess.get_total_token_usage().await;
+    let current_tokens = sess.get_last_token_usage().await;
 
     // 调试日志：显示 compact 相关的关键参数
     tracing::warn!(
@@ -2300,15 +2367,33 @@ pub(crate) async fn run_task(
         current_tokens, auto_compact_limit, preemptive_compact_threshold
     );
 
+    // 检查是否处于逻辑单元边界
+    let at_boundary = sess.is_at_logical_unit_boundary().await;
+    let plan_progress = sess.get_plan_progress().await;
+
     if current_tokens >= preemptive_compact_threshold {
-        info!(
-            "Preemptive compact: current tokens ({}) >= 80% threshold ({})",
-            current_tokens, preemptive_compact_threshold
-        );
-        if should_use_remote_compact_task(&sess) {
-            run_inline_remote_auto_compact_task(sess.clone(), turn_context.clone()).await;
+        if at_boundary {
+            info!(
+                "Preemptive compact: current tokens ({}) >= 80% threshold ({}), at logical unit boundary",
+                current_tokens, preemptive_compact_threshold
+            );
+            if should_use_remote_compact_task(&sess) {
+                run_inline_remote_auto_compact_task(sess.clone(), turn_context.clone()).await;
+            } else {
+                run_inline_auto_compact_task(sess.clone(), turn_context.clone()).await;
+            }
         } else {
-            run_inline_auto_compact_task(sess.clone(), turn_context.clone()).await;
+            // 不在逻辑单元边界，记录日志但延迟 compact
+            if let Some(progress) = &plan_progress {
+                info!(
+                    "Delaying preemptive compact: not at logical unit boundary. Plan progress: {}/{} completed, {} in_progress, {} pending",
+                    progress.completed, progress.total, progress.in_progress, progress.pending
+                );
+            } else {
+                info!(
+                    "Delaying preemptive compact: not at logical unit boundary (no plan info)"
+                );
+            }
         }
     }
 
@@ -2332,6 +2417,15 @@ pub(crate) async fn run_task(
     // 追踪 ContextWindowExceeded 重试次数，防止无限循环
     let mut context_window_retry_count = 0;
     const MAX_CONTEXT_WINDOW_RETRIES: usize = 2;
+
+    // 追踪 plan 未完成时的提醒次数，防止无限循环
+    let mut plan_continuation_reminder_count = 0;
+    const MAX_PLAN_CONTINUATION_REMINDERS: usize = 5;
+
+    // 追踪空响应继续次数，防止无限循环
+    let mut empty_response_continuation_count = 0;
+    const MAX_EMPTY_RESPONSE_CONTINUATIONS: usize = 3;
+
     let mut turn_count = 0usize;
 
     loop {
@@ -2345,6 +2439,19 @@ pub(crate) async fn run_task(
             .into_iter()
             .map(ResponseItem::from)
             .collect::<Vec<ResponseItem>>();
+
+        // 🆕 如果有排队的输入，发送事件通知用户
+        if !pending_input.is_empty() {
+            tracing::info!(
+                "📥 [codex::inner_loop] 正在处理 {} 条排队的用户输入",
+                pending_input.len()
+            );
+            sess.notify_background_event(
+                &turn_context,
+                format!("正在处理排队的用户输入 ({} 条)", pending_input.len()),
+            )
+            .await;
+        }
 
         // Construct the input that we will send to the model.
         let turn_input: Vec<ResponseItem> = {
@@ -2418,8 +2525,38 @@ pub(crate) async fn run_task(
                     .get_model_family()
                     .auto_compact_token_limit()
                     .unwrap_or(i64::MAX);
-                let total_usage_tokens = sess.get_total_token_usage().await;
-                let token_limit_reached = total_usage_tokens >= limit;
+                // 使用总 token 数量来判断是否需要 compact
+                // 缓存 token 虽然费用低，但仍然占用上下文窗口空间
+                let total_tokens = sess.get_total_token_usage().await;
+                let cached_tokens = sess.get_cached_token_usage().await;
+                let token_limit_reached = total_tokens >= limit;
+
+                // 检查逻辑单元边界状态
+                let at_boundary = sess.is_at_logical_unit_boundary().await;
+                let plan_progress = sess.get_plan_progress().await;
+
+                if token_limit_reached {
+                    if at_boundary {
+                        tracing::info!(
+                            "📊 [run_task] Token 限制检查: 总计={}, 缓存={}, 限制={}，在逻辑单元边界，触发 compact",
+                            total_tokens, cached_tokens, limit
+                        );
+                    } else {
+                        // 达到 100% 限制时，即使不在边界也必须 compact
+                        if let Some(progress) = &plan_progress {
+                            tracing::warn!(
+                                "📊 [run_task] Token 限制检查: 总计={}, 缓存={}, 限制={}，不在逻辑单元边界但必须 compact。Plan: {}/{} completed, {} in_progress, {} pending",
+                                total_tokens, cached_tokens, limit,
+                                progress.completed, progress.total, progress.in_progress, progress.pending
+                            );
+                        } else {
+                            tracing::warn!(
+                                "📊 [run_task] Token 限制检查: 总计={}, 缓存={}, 限制={}，不在逻辑单元边界但必须 compact",
+                                total_tokens, cached_tokens, limit
+                            );
+                        }
+                    }
+                }
 
                 // as long as compaction works well in getting us way below the token limit, we shouldn't worry about being in an infinite loop.
                 if token_limit_reached {
@@ -2432,7 +2569,105 @@ pub(crate) async fn run_task(
                     continue;
                 }
 
+                // 检查 plan 完成状态
+                let plan_progress = sess.get_plan_progress().await;
+                let plan_incomplete = plan_progress
+                    .as_ref()
+                    .map(crate::state::PlanProgress::has_incomplete_steps)
+                    .unwrap_or(false);
+
                 if !needs_follow_up {
+                    // 如果 plan 还有未完成的步骤，继续执行（但有连续次数限制）
+                    if plan_incomplete && plan_continuation_reminder_count < MAX_PLAN_CONTINUATION_REMINDERS {
+                        plan_continuation_reminder_count += 1;
+
+                        if let Some(ref progress) = plan_progress {
+                            tracing::warn!(
+                                "📋 [run_task] 模型停止但 plan 未完成: {}/{} completed, {} in_progress, {} pending。连续提醒次数: {}/{}",
+                                progress.completed, progress.total, progress.in_progress, progress.pending,
+                                plan_continuation_reminder_count, MAX_PLAN_CONTINUATION_REMINDERS
+                            );
+
+                            // 注入一条用户消息提醒模型继续执行
+                            let reminder_message = ResponseItem::Message {
+                                id: None,
+                                role: "user".to_string(),
+                                content: vec![ContentItem::InputText {
+                                    text: format!(
+                                        "<system-reminder>\nYour plan has {} pending and {} in-progress steps remaining. Please continue executing the plan until all steps are completed. Do not stop until all plan items are marked as completed.\n</system-reminder>",
+                                        progress.pending, progress.in_progress
+                                    ),
+                                }],
+                            };
+                            sess.record_conversation_items(&turn_context, std::slice::from_ref(&reminder_message))
+                                .await;
+                        }
+                        // 发送提醒让前端知道
+                        sess.notify_background_event(
+                            &turn_context,
+                            format!("Plan has incomplete steps. Continuing execution... (consecutive reminder {plan_continuation_reminder_count}/{MAX_PLAN_CONTINUATION_REMINDERS})"),
+                        )
+                        .await;
+                        continue;
+                    }
+
+                    // 如果达到最大连续提醒次数，记录警告但仍然结束任务
+                    if plan_incomplete {
+                        if let Some(ref progress) = plan_progress {
+                            tracing::warn!(
+                                "⚠️ [run_task] 达到最大连续提醒次数 ({})，plan 仍未完成: {}/{} completed, {} in_progress, {} pending。结束任务。",
+                                MAX_PLAN_CONTINUATION_REMINDERS,
+                                progress.completed, progress.total, progress.in_progress, progress.pending
+                            );
+                        }
+                        sess.notify_background_event(
+                            &turn_context,
+                            format!("Warning: Plan incomplete after {MAX_PLAN_CONTINUATION_REMINDERS} consecutive reminders. Ending task."),
+                        )
+                        .await;
+                    }
+
+                    // 检测空响应：如果模型没有返回有意义的内容，可能需要继续
+                    // 这种情况常见于某些模型（如 GLM、Haiku）在执行工具后返回空内容
+                    let is_empty_response = turn_last_agent_message
+                        .as_ref()
+                        .map(|msg| msg.trim().is_empty())
+                        .unwrap_or(true);
+
+                    // 检查历史中是否有最近的工具调用（表明模型可能还在工作中）
+                    let mut history = sess.clone_history().await;
+                    let recent_items = history.get_history_for_prompt();
+                    let has_recent_tool_output = recent_items.iter().rev().take(5).any(|item| {
+                        matches!(item, ResponseItem::FunctionCallOutput { .. } | ResponseItem::CustomToolCallOutput { .. })
+                    });
+
+                    if is_empty_response && has_recent_tool_output && empty_response_continuation_count < MAX_EMPTY_RESPONSE_CONTINUATIONS {
+                        empty_response_continuation_count += 1;
+                        tracing::warn!(
+                            "⚠️ [run_task] 检测到空响应，但有最近的工具输出。尝试继续执行... (连续次数: {}/{})",
+                            empty_response_continuation_count, MAX_EMPTY_RESPONSE_CONTINUATIONS
+                        );
+
+                        // 注入一条用户消息提醒模型继续
+                        let reminder_message = ResponseItem::Message {
+                            id: None,
+                            role: "user".to_string(),
+                            content: vec![ContentItem::InputText {
+                                text: "<system-reminder>\nThe previous tool execution completed. Please continue with your response and complete the task. If you need to execute more commands, please do so. If the task is complete, provide a summary.\n</system-reminder>".to_string(),
+                            }],
+                        };
+                        sess.record_conversation_items(&turn_context, std::slice::from_ref(&reminder_message))
+                            .await;
+
+                        sess.notify_background_event(
+                            &turn_context,
+                            format!("Empty response detected after tool execution. Continuing... (attempt {empty_response_continuation_count}/{MAX_EMPTY_RESPONSE_CONTINUATIONS})"),
+                        )
+                        .await;
+                        continue;
+                    }
+
+                    // plan 已完成或没有 plan 或达到最大连续提醒次数，结束任务
                     last_agent_message = turn_last_agent_message;
                     sess.notifier()
                         .notify(&UserNotification::AgentTurnComplete {
@@ -2444,6 +2679,9 @@ pub(crate) async fn run_task(
                         });
                     break;
                 }
+
+                // 模型请求了工具调用，重置连续提醒计数器
+                plan_continuation_reminder_count = 0;
                 continue;
             }
             Err(CodexErr::TurnAborted) => {
@@ -2547,18 +2785,28 @@ async fn run_turn(
         .get_model_family()
         .supports_parallel_tool_calls;
 
+    // 从配置中读取模型生成参数
+    let config = turn_context.client.config();
     let prompt = Prompt {
         input,
         tools: router.specs(),
         parallel_tool_calls: model_supports_parallel && sess.enabled(Feature::ParallelToolCalls),
         base_instructions_override: turn_context.base_instructions.clone(),
         output_schema: turn_context.final_output_json_schema.clone(),
-        temperature: None,
-        top_k: None,
-        top_p: None,
-        repetition_penalty: None,
+        temperature: config.model_temperature,
+        top_k: config.model_top_k,
+        top_p: config.model_top_p,
+        repetition_penalty: config.model_repetition_penalty,
+        is_user_turn: turn_context.is_user_turn,
     };
-    tracing::warn!("   📝 Prompt 创建完成，tools 数量: {}", prompt.tools.len());
+    tracing::warn!(
+        "   📝 Prompt 创建完成，tools 数量: {}, temperature: {:?}, top_k: {:?}, top_p: {:?}, repetition_penalty: {:?}",
+        prompt.tools.len(),
+        prompt.temperature,
+        prompt.top_k,
+        prompt.top_p,
+        prompt.repetition_penalty
+    );
 
     let mut retries = 0;
     loop {
@@ -2648,7 +2896,10 @@ async fn drain_in_flight(
                     .await;
             }
             Err(err) => {
-                error_or_panic(format!("in-flight tool future failed during drain: {err}"));
+                // 工具任务失败时，记录警告而不是 panic
+                // 这种情况可能发生在 SSE 超时重试时，工具任务被取消或 panic
+                // 缺失的输出将在后续的 normalize_history 中被处理
+                tracing::warn!("in-flight tool future failed during drain: {err}");
             }
         }
     }
@@ -3306,6 +3557,7 @@ mod tests {
             model_family,
             conversation_id,
             "turn_id".to_string(),
+            true, // is_user_turn: 测试默认为 true
         );
 
         let session = Session {
@@ -3389,6 +3641,7 @@ mod tests {
             model_family,
             conversation_id,
             "turn_id".to_string(),
+            true, // is_user_turn: 测试默认为 true
         ));
 
         let session = Arc::new(Session {

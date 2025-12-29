@@ -46,17 +46,22 @@ pub struct Prompt {
     /// Higher values make output more random, lower values more deterministic.
     pub temperature: Option<f64>,
 
-    /// Top-k sampling parameter. Limits the number of highest probability 
+    /// Top-k sampling parameter. Limits the number of highest probability
     /// vocabulary tokens to keep for top-k-filtering.
     pub top_k: Option<u32>,
 
-    /// Top-p (nucleus) sampling parameter (0.0-1.0). 
+    /// Top-p (nucleus) sampling parameter (0.0-1.0).
     /// Keeps the smallest set of tokens whose cumulative probability exceeds top_p.
     pub top_p: Option<f64>,
 
     /// Repetition penalty parameter (typically 1.0-1.2).
     /// Values > 1.0 discourage repetition, values < 1.0 encourage it.
     pub repetition_penalty: Option<f64>,
+
+    /// 是否为用户主动发送的消息（用于服务端统计 turn_count）
+    /// - true: 用户从输入框主动发送
+    /// - false: 系统自动发送（如继续执行、命令反馈等）
+    pub is_user_turn: bool,
 }
 
 impl Prompt {

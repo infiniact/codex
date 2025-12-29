@@ -92,6 +92,7 @@ async fn run_compact_task_inner(
             top_k: None,
             top_p: None,
             repetition_penalty: None,
+            is_user_turn: false, // compact 是系统自动操作
         };
         let attempt_result = drain_to_completed(&sess, turn_context.as_ref(), &prompt).await;
 
@@ -155,8 +156,57 @@ async fn run_compact_task_inner(
     let summary_text = get_last_assistant_message_from_turn(&history_snapshot).unwrap_or_default();
     let user_messages = collect_user_messages(&history_snapshot);
 
+    // 🔧 保存当前 plan 状态，在 compact 后恢复
+    let current_plan = sess.get_current_plan().await;
+
     let initial_context = sess.build_initial_context(turn_context.as_ref());
     let mut new_history = build_compacted_history(initial_context, &user_messages, &summary_text);
+
+    // 🔧 如果有未完成的 plan，将 plan 状态注入到新历史中
+    if let Some(ref plan) = current_plan {
+        let pending_count = plan.plan.iter()
+            .filter(|s| matches!(s.status, codex_protocol::plan_tool::StepStatus::Pending))
+            .count();
+        let in_progress_count = plan.plan.iter()
+            .filter(|s| matches!(s.status, codex_protocol::plan_tool::StepStatus::InProgress))
+            .count();
+        let completed_count = plan.plan.iter()
+            .filter(|s| matches!(s.status, codex_protocol::plan_tool::StepStatus::Completed))
+            .count();
+
+        if pending_count > 0 || in_progress_count > 0 {
+            // 构建 plan 状态描述
+            let plan_steps: Vec<String> = plan.plan.iter().map(|step| {
+                let status_emoji = match step.status {
+                    codex_protocol::plan_tool::StepStatus::Completed => "✅",
+                    codex_protocol::plan_tool::StepStatus::InProgress => "🔄",
+                    codex_protocol::plan_tool::StepStatus::Pending => "⏳",
+                };
+                format!("{} {}", status_emoji, step.step)
+            }).collect();
+
+            let plan_reminder = format!(
+                "<system-reminder>\nYou have an active plan with {} steps ({} completed, {} in progress, {} pending).\n\nCurrent plan status:\n{}\n\nPlease continue executing the remaining steps. Do not restart or modify the plan unless necessary.\n</system-reminder>",
+                plan.plan.len(),
+                completed_count,
+                in_progress_count,
+                pending_count,
+                plan_steps.join("\n")
+            );
+
+            new_history.push(ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText { text: plan_reminder }],
+            });
+
+            tracing::info!(
+                "📋 [compact] 保留 plan 状态: {}/{} completed, {} in_progress, {} pending",
+                completed_count, plan.plan.len(), in_progress_count, pending_count
+            );
+        }
+    }
+
     let ghost_snapshots: Vec<ResponseItem> = history_snapshot
         .iter()
         .filter(|item| matches!(item, ResponseItem::GhostSnapshot { .. }))

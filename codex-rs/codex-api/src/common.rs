@@ -155,7 +155,7 @@ pub fn create_text_param_for_request(
 }
 
 pub struct ResponseStream {
-    pub rx_event: mpsc::Receiver<Result<ResponseEvent, ApiError>>,
+    pub rx_event: mpsc::UnboundedReceiver<Result<ResponseEvent, ApiError>>,
 }
 
 impl Stream for ResponseStream {

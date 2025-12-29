@@ -31,6 +31,8 @@ pub struct ResponsesOptions {
     pub store_override: Option<bool>,
     pub conversation_id: Option<String>,
     pub session_source: Option<SessionSource>,
+    /// 是否为用户主动发送（用于服务端统计）
+    pub is_user_turn: bool,
 }
 
 impl<T: HttpTransport, A: AuthProvider> ResponsesClient<T, A> {
@@ -71,6 +73,7 @@ impl<T: HttpTransport, A: AuthProvider> ResponsesClient<T, A> {
             store_override,
             conversation_id,
             session_source,
+            is_user_turn,
         } = options;
 
         let request = ResponsesRequestBuilder::new(model, &prompt.instructions, &prompt.input)
@@ -83,6 +86,7 @@ impl<T: HttpTransport, A: AuthProvider> ResponsesClient<T, A> {
             .conversation(conversation_id)
             .session_source(session_source)
             .store_override(store_override)
+            .is_user_turn(is_user_turn)
             .build(self.streaming.provider())?;
 
         self.stream_request(request).await

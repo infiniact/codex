@@ -20,6 +20,7 @@ use crate::tools::sandboxing::ToolCtx;
 use crate::tools::sandboxing::ToolError;
 use crate::tools::sandboxing::ToolRuntime;
 use crate::tools::sandboxing::with_cached_approval;
+use crate::bash::extract_bash_command;
 use crate::unified_exec::format_command_for_execution;
 use codex_protocol::protocol::ReviewDecision;
 use futures::future::BoxFuture;
@@ -168,9 +169,15 @@ impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
                     connection_id
                 );
 
-                // Build command string from command vec - 使用智能格式化处理 bash -c 等命令
-                let command_str = format_command_for_execution(&req.command);
-                let shell = ctx.session.user_shell().shell_path.to_string_lossy().to_string();
+                // 🔧 修复：当有远程连接时，提取原始命令而不是保留 shell 包装
+                // 因为远程设备的 shell 环境未知（可能没有 /bin/zsh），直接发送原始命令
+                let (command_str, shell) = if let Some((_, script)) = extract_bash_command(&req.command) {
+                    // 提取出原始脚本，不使用本地 shell 包装
+                    (script.to_string(), String::new())
+                } else {
+                    // 不是 shell 包装形式，使用原始命令格式化
+                    (format_command_for_execution(&req.command), String::new())
+                };
 
                 // Execute through PTY bridge
                 match pty_bridge.execute(

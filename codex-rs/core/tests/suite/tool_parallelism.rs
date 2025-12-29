@@ -39,6 +39,7 @@ async fn run_turn(test: &TestCodex, prompt: &str) -> anyhow::Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 

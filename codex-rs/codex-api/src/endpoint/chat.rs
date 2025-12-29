@@ -55,6 +55,7 @@ impl<T: HttpTransport, A: AuthProvider> ChatClient<T, A> {
         prompt: &ApiPrompt,
         conversation_id: Option<String>,
         session_source: Option<SessionSource>,
+        is_user_turn: bool,
     ) -> Result<ResponseStream, ApiError> {
         use crate::requests::ChatRequestBuilder;
 
@@ -62,6 +63,7 @@ impl<T: HttpTransport, A: AuthProvider> ChatClient<T, A> {
             ChatRequestBuilder::new(model, &prompt.instructions, &prompt.input, &prompt.tools)
                 .conversation_id(conversation_id)
                 .session_source(session_source)
+                .is_user_turn(is_user_turn)
                 .build(self.streaming.provider())?;
 
         self.stream_request(request).await

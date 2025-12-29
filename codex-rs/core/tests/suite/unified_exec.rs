@@ -204,6 +204,7 @@ async fn unified_exec_intercepts_apply_patch_exec_command() -> Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 
@@ -330,6 +331,7 @@ async fn unified_exec_emits_exec_command_begin_event() -> Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 
@@ -405,6 +407,7 @@ async fn unified_exec_resolves_relative_workdir() -> Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 
@@ -483,6 +486,7 @@ async fn unified_exec_respects_workdir_override() -> Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 
@@ -573,6 +577,7 @@ async fn unified_exec_emits_exec_command_end_event() -> Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 
@@ -645,6 +650,7 @@ async fn unified_exec_emits_output_delta_for_exec_command() -> Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 
@@ -717,6 +723,7 @@ async fn unified_exec_full_lifecycle_with_background_end_event() -> Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 
@@ -846,6 +853,7 @@ async fn unified_exec_emits_terminal_interaction_for_write_stdin() -> Result<()>
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 
@@ -979,6 +987,7 @@ async fn unified_exec_terminal_interaction_captures_delayed_output() -> Result<(
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 
@@ -1130,6 +1139,7 @@ async fn unified_exec_emits_one_begin_and_one_end_event() -> Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 
@@ -1225,6 +1235,7 @@ async fn exec_command_reports_chunk_and_exit_metadata() -> Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 
@@ -1332,6 +1343,7 @@ async fn unified_exec_respects_early_exit_notifications() -> Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 
@@ -1460,6 +1472,7 @@ async fn write_stdin_returns_exit_metadata_and_clears_session() -> Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 
@@ -1625,6 +1638,7 @@ async fn unified_exec_emits_end_event_when_session_dies_via_stdin() -> Result<()
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 
@@ -1712,6 +1726,7 @@ async fn unified_exec_reuses_session_via_stdin() -> Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 
@@ -1844,6 +1859,7 @@ PY
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
     // This is a worst case scenario for the truncate logic.
@@ -1956,6 +1972,7 @@ async fn unified_exec_timeout_and_followup_poll() -> Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 
@@ -2050,6 +2067,7 @@ PY
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 
@@ -2130,6 +2148,7 @@ async fn unified_exec_runs_under_sandbox() -> Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 
@@ -2231,6 +2250,7 @@ async fn unified_exec_python_prompt_under_seatbelt() -> Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 
@@ -2324,6 +2344,7 @@ async fn unified_exec_runs_on_all_platforms() -> Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 
@@ -2455,6 +2476,7 @@ async fn unified_exec_prunes_exited_sessions_first() -> Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 

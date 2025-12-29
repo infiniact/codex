@@ -218,20 +218,63 @@ pub(crate) async fn stream_chat_completions(
                 name,
                 arguments,
                 call_id,
+                thought_signature,
                 ..
             } => {
+                // 尝试将 arguments 字符串解析为 JSON 对象
+                // 某些 API（如 Anthropic、Gemini）期望 arguments 是对象而不是字符串
+                let arguments_value: serde_json::Value = serde_json::from_str(arguments)
+                    .unwrap_or_else(|_| json!(arguments));
+
+                let function_obj = json!({
+                    "name": name,
+                    "arguments": arguments_value,
+                });
+
+                // 🔧 修复：thought_signature 应该放在 tool_call 级别，而不是 function 级别
+                // 参考：https://openrouter.ai/docs/guides/best-practices/reasoning-tokens
+                let mut tool_call_obj = json!({
+                    "id": call_id,
+                    "type": "function",
+                    "function": function_obj,
+                });
+
+                // Add thought_signature at tool_call level (NOT inside function object)
+                if let Some(sig) = &thought_signature {
+                    if let Some(obj) = tool_call_obj.as_object_mut() {
+                        obj.insert("thought_signature".to_string(), json!(sig));
+                    }
+                    debug!(
+                        "🧠 [chat_completions] 添加 thought_signature 到 tool_call: call_id={}, sig_len={}",
+                        call_id,
+                        sig.len()
+                    );
+                }
+
                 let mut msg = json!({
                     "role": "assistant",
                     "content": null,
-                    "tool_calls": [{
-                        "id": call_id,
-                        "type": "function",
-                        "function": {
-                            "name": name,
-                            "arguments": arguments,
-                        }
-                    }]
+                    "tool_calls": [tool_call_obj]
                 });
+
+                // 🆕 为 OpenRouter/Gemini 添加 reasoning_details（在 message 级别）
+                // 格式: "reasoning_details":[{"id":"tool_xxx", "type":"reasoning.encrypted", "data":"...", "format":"google-gemini-v1"}]
+                if let Some(sig) = &thought_signature {
+                    if let Some(obj) = msg.as_object_mut() {
+                        obj.insert("reasoning_details".to_string(), json!([{
+                            "id": call_id,
+                            "type": "reasoning.encrypted",
+                            "data": sig,
+                            "format": "google-gemini-v1"
+                        }]));
+                        debug!(
+                            "🧠 [chat_completions] 添加 reasoning_details: call_id={}, sig_len={}",
+                            call_id,
+                            sig.len()
+                        );
+                    }
+                }
+
                 if let Some(reasoning) = reasoning_by_anchor_index.get(&idx)
                     && let Some(obj) = msg.as_object_mut()
                 {
@@ -340,6 +383,26 @@ pub(crate) async fn stream_chat_completions(
         },
         "tools": tools_json,
     });
+
+    // 🆕 为 Gemini 模型启用推理功能（OpenRouter 需要）
+    // 检测是否为 Gemini 3 模型（需要 thought_signature 支持）
+    let is_gemini_3 = model_family.slug.contains("gemini-3")
+        || model_family.slug.contains("gemini/gemini-3")
+        || model_family.slug.contains("google/gemini-3");
+    if is_gemini_3 {
+        // OpenRouter 需要 reasoning 参数来启用 Gemini 的推理功能
+        // 参考: https://openrouter.ai/docs/guides/best-practices/reasoning-tokens
+        payload["reasoning"] = json!({
+            "enabled": true
+        });
+        // 同时添加 stream_options 以包含推理细节
+        if let Some(stream_options) = payload.get_mut("stream_options").and_then(|v| v.as_object_mut()) {
+            stream_options.insert("include_reasoning".to_string(), json!(true));
+        }
+        debug!(
+            "🧠 [chat_completions] Gemini 3 模型检测到，已启用 reasoning 功能"
+        );
+    }
 
     // Add model generation parameters if they are set
     if let Some(temperature) = prompt.temperature {
@@ -762,6 +825,7 @@ async fn process_chat_sse<S>(
                             name: fn_call_state.name.clone().unwrap_or_else(|| "".to_string()),
                             arguments: fn_call_state.arguments.clone(),
                             call_id: fn_call_state.call_id.clone().unwrap_or_else(String::new),
+                            thought_signature: None,
                         };
 
                         let _ = tx_event.send(Ok(ResponseEvent::OutputItemDone(item))).await;

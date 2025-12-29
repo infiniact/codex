@@ -105,6 +105,12 @@ pub enum Op {
         summary: ReasoningSummaryConfig,
         // The JSON schema to use for the final assistant message
         final_output_json_schema: Option<Value>,
+
+        /// 🔢 是否为用户主动发送的消息（用于服务端统计 turn_count）
+        /// - true: 用户从输入框主动发送
+        /// - false: 系统自动发送（如继续执行、命令反馈等）
+        #[serde(default = "default_is_user_turn")]
+        is_user_turn: bool,
     },
 
     /// Override parts of the persistent turn context for subsequent turns.
@@ -148,6 +154,8 @@ pub enum Op {
         id: String,
         /// The user's decision in response to the request.
         decision: ReviewDecision,
+        /// Optional custom message from the user when denying the request.
+        custom_message: Option<String>,
     },
 
     /// Approve a code patch
@@ -156,6 +164,8 @@ pub enum Op {
         id: String,
         /// The user's decision in response to the request.
         decision: ReviewDecision,
+        /// Optional custom message from the user when denying the request.
+        custom_message: Option<String>,
     },
 
     /// Resolve an MCP elicitation request.
@@ -1732,6 +1742,11 @@ pub enum TurnAbortReason {
     Interrupted,
     Replaced,
     ReviewEnded,
+}
+
+/// 默认 is_user_turn 为 true（向后兼容）
+fn default_is_user_turn() -> bool {
+    true
 }
 
 #[cfg(test)]

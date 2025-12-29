@@ -118,6 +118,9 @@ pub(crate) async fn handle_update_plan(
         .filter(|s| matches!(s.status, StepStatus::InProgress))
         .count();
 
+    // 持久化 plan 状态到 Session，用于 compact 后恢复
+    session.set_current_plan(args.clone()).await;
+
     session
         .send_event(turn_context, EventMsg::PlanUpdate(args))
         .await;
@@ -128,12 +131,78 @@ pub(crate) async fn handle_update_plan(
             "Plan updated. {pending_count} step(s) pending, {in_progress_count} step(s) in progress. Continue executing the remaining steps."
         ))
     } else {
+        // 所有步骤完成时，清除 plan 状态
+        session.clear_current_plan().await;
         Ok("Plan updated. All steps completed.".to_string())
     }
 }
 
 fn parse_update_plan_arguments(arguments: &str) -> Result<UpdatePlanArgs, FunctionCallError> {
-    serde_json::from_str::<UpdatePlanArgs>(arguments).map_err(|e| {
-        FunctionCallError::RespondToModel(format!("failed to parse function arguments: {e}"))
-    })
+    // 首先尝试标准 JSON 解析
+    if let Ok(args) = serde_json::from_str::<UpdatePlanArgs>(arguments) {
+        return Ok(args);
+    }
+
+    // 如果 JSON 解析失败，尝试解析 XML 风格的格式
+    // 格式如：<tool_call>update_plan<arg_key>explanation</arg_key><arg_value>...</arg_value>...
+    if arguments.contains("<arg_key>") && arguments.contains("<arg_value>") {
+        tracing::warn!("检测到 XML 风格的工具调用格式，尝试解析...");
+
+        let mut explanation: Option<String> = None;
+        let mut plan: Vec<codex_protocol::plan_tool::PlanItemArg> = Vec::new();
+
+        // 提取所有 <arg_key>...</arg_key><arg_value>...</arg_value> 对
+        let mut remaining = arguments;
+        while let Some(key_start) = remaining.find("<arg_key>") {
+            let key_end = remaining.find("</arg_key>").unwrap_or(remaining.len());
+            let key = &remaining[key_start + 9..key_end];
+
+            let value_section = &remaining[key_end..];
+            let value_start = value_section.find("<arg_value>").unwrap_or(0);
+            let value_end = value_section.find("</arg_value>").unwrap_or(value_section.len());
+            let value = if value_start > 0 && value_end > value_start {
+                &value_section[value_start + 11..value_end]
+            } else {
+                ""
+            };
+
+            match key {
+                "explanation" => {
+                    explanation = Some(value.to_string());
+                }
+                "plan" => {
+                    // 尝试解析 plan 数组
+                    if let Ok(parsed_plan) = serde_json::from_str::<Vec<codex_protocol::plan_tool::PlanItemArg>>(value) {
+                        plan = parsed_plan;
+                    } else {
+                        tracing::warn!("无法解析 plan 值: {}", value);
+                    }
+                }
+                _ => {
+                    tracing::debug!("忽略未知的 arg_key: {}", key);
+                }
+            }
+
+            // 移动到下一个 arg_key
+            if let Some(next_key) = value_section.find("<arg_key>") {
+                remaining = &value_section[next_key..];
+            } else {
+                break;
+            }
+        }
+
+        if !plan.is_empty() {
+            return Ok(UpdatePlanArgs { explanation, plan });
+        }
+    }
+
+    // 如果两种格式都无法解析，返回错误
+    Err(FunctionCallError::RespondToModel(format!(
+        "failed to parse function arguments (expected JSON or XML format): {}",
+        if arguments.len() > 200 {
+            format!("{}...", &arguments[..200])
+        } else {
+            arguments.to_string()
+        }
+    )))
 }

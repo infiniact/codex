@@ -498,6 +498,7 @@ async fn submit_turn(
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 
@@ -1525,6 +1526,7 @@ async fn run_scenario(scenario: &ScenarioSpec) -> Result<()> {
                 .submit(Op::ExecApproval {
                     id: "0".into(),
                     decision: decision.clone(),
+                    custom_message: None,
                 })
                 .await?;
             wait_for_completion(&test).await;
@@ -1546,6 +1548,7 @@ async fn run_scenario(scenario: &ScenarioSpec) -> Result<()> {
                 .submit(Op::PatchApproval {
                     id: "0".into(),
                     decision: decision.clone(),
+                    custom_message: None,
                 })
                 .await?;
             wait_for_completion(&test).await;
@@ -1623,6 +1626,7 @@ async fn approving_execpolicy_amendment_persists_policy_and_skips_future_prompts
             decision: ReviewDecision::ApprovedExecpolicyAmendment {
                 proposed_execpolicy_amendment: expected_execpolicy_amendment.clone(),
             },
+            custom_message: None,
         })
         .await?;
     wait_for_completion(&test).await;

@@ -210,6 +210,7 @@ impl TestCodex {
                 model: session_model,
                 effort: None,
                 summary: ReasoningSummary::Auto,
+                is_user_turn: true,
             })
             .await?;
 

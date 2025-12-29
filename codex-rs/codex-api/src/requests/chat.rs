@@ -3,6 +3,7 @@ use crate::provider::Provider;
 use crate::requests::headers::build_conversation_headers;
 use crate::requests::headers::insert_header;
 use crate::requests::headers::subagent_header;
+use crate::turn_signing::TurnSignature;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ReasoningItemContent;
@@ -26,6 +27,8 @@ pub struct ChatRequestBuilder<'a> {
     tools: &'a [Value],
     conversation_id: Option<String>,
     session_source: Option<SessionSource>,
+    /// 是否为用户主动发送（用于服务端统计）
+    is_user_turn: bool,
 }
 
 impl<'a> ChatRequestBuilder<'a> {
@@ -42,6 +45,7 @@ impl<'a> ChatRequestBuilder<'a> {
             tools,
             conversation_id: None,
             session_source: None,
+            is_user_turn: true, // 默认为用户主动发送
         }
     }
 
@@ -55,11 +59,33 @@ impl<'a> ChatRequestBuilder<'a> {
         self
     }
 
+    /// 设置是否为用户主动发送
+    pub fn is_user_turn(mut self, value: bool) -> Self {
+        self.is_user_turn = value;
+        self
+    }
+
     pub fn build(self, _provider: &Provider) -> Result<ChatRequest, ApiError> {
         let mut messages = Vec::<Value>::new();
         messages.push(json!({"role": "system", "content": self.instructions}));
 
         let input = self.input;
+
+        // 预扫描：收集所有有对应 FunctionCallOutput 的 call_id
+        // 这样我们可以确保每个 tool_calls 都有对应的 tool 响应
+        let call_ids_with_output: std::collections::HashSet<String> = input
+            .iter()
+            .filter_map(|item| {
+                if let ResponseItem::FunctionCallOutput { call_id, .. } = item {
+                    Some(call_id.clone())
+                } else if let ResponseItem::CustomToolCallOutput { call_id, .. } = item {
+                    Some(call_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         let mut reasoning_by_anchor_index: HashMap<usize, String> = HashMap::new();
         let mut last_emitted_role: Option<&str> = None;
         for item in input {
@@ -202,20 +228,87 @@ impl<'a> ChatRequestBuilder<'a> {
                     name,
                     arguments,
                     call_id,
+                    thought_signature,
                     ..
                 } => {
+                    // 尝试将 arguments 字符串解析为 JSON 对象
+                    // 某些 API（如 Anthropic、Gemini）期望 arguments 是对象而不是字符串
+                    // OpenAI 兼容 API 通常接受字符串格式
+                    let arguments_value: Value = serde_json::from_str(arguments)
+                        .unwrap_or_else(|_| json!(arguments));
+
+                    // 检查这个 FunctionCall 是否有对应的 FunctionCallOutput
+                    // 如果没有，则转换为文本消息，避免 OpenRouter 报错
+                    // "insufficient tool messages following tool_calls message"
+                    if !call_ids_with_output.contains(call_id) {
+                        let description = format!(
+                            "[Tool Call: {}]\nArguments: {}\nCall ID: {}\n(No output recorded)",
+                            name,
+                            serde_json::to_string_pretty(&arguments_value).unwrap_or_else(|_| arguments.clone()),
+                            call_id
+                        );
+                        let mut msg = json!({
+                            "role": "assistant",
+                            "content": description
+                        });
+                        if let Some(reasoning) = reasoning_by_anchor_index.get(&idx)
+                            && let Some(obj) = msg.as_object_mut()
+                        {
+                            obj.insert("reasoning".to_string(), json!(reasoning));
+                        }
+                        messages.push(msg);
+                        continue;
+                    }
+
+                    let function_obj = json!({
+                        "name": name,
+                        "arguments": arguments_value,
+                    });
+
+                    // 🔧 修复：thought_signature 应该放在 tool_call 级别，而不是 function 级别
+                    // 参考：https://openrouter.ai/docs/guides/best-practices/reasoning-tokens
+                    let mut tool_call_obj = json!({
+                        "id": call_id,
+                        "type": "function",
+                        "function": function_obj,
+                    });
+
+                    // Add thought_signature at tool_call level (NOT inside function object)
+                    if let Some(sig) = &thought_signature {
+                        if let Some(obj) = tool_call_obj.as_object_mut() {
+                            obj.insert("thought_signature".to_string(), json!(sig));
+                        }
+                        tracing::warn!(
+                            "🧠 [ChatRequestBuilder::build] 添加 thought_signature 到 tool_call: call_id={}, sig_len={}",
+                            call_id,
+                            sig.len()
+                        );
+                    }
+
                     let mut msg = json!({
                         "role": "assistant",
                         "content": null,
-                        "tool_calls": [{
-                            "id": call_id,
-                            "type": "function",
-                            "function": {
-                                "name": name,
-                                "arguments": arguments,
-                            }
-                        }]
+                        "tool_calls": [tool_call_obj]
                     });
+
+                    // 🆕 为 OpenRouter/Gemini 添加 reasoning_details（在 message 级别）
+                    // 格式: "reasoning_details":[{"id":"tool_xxx", "type":"reasoning.encrypted", "data":"...", "format":"google-gemini-v1"}]
+                    if let Some(sig) = &thought_signature
+                        && let Some(obj) = msg.as_object_mut()
+                    {
+                        obj.insert("reasoning_details".to_string(), json!([{
+                            "id": call_id,
+                            "type": "reasoning.encrypted",
+                            "data": sig,
+                            "format": "google-gemini-v1"
+                        }]));
+                        tracing::debug!(
+                            "🧠 [ChatRequestBuilder::build] 添加 reasoning_details: call_id={}, sig_len={}",
+                            call_id,
+                            sig.len()
+                        );
+                    }
+
                     if let Some(reasoning) = reasoning_by_anchor_index.get(&idx)
                         && let Some(obj) = msg.as_object_mut()
                     {
@@ -229,15 +322,19 @@ impl<'a> ChatRequestBuilder<'a> {
                     status,
                     action,
                 } => {
+                    // LocalShellCall 没有对应的 tool 响应消息，所以不能作为 tool_calls 发送
+                    // 否则会导致 OpenRouter 报错: "insufficient tool messages following tool_calls message"
+                    // 将其转换为普通的 assistant 文本消息
+                    let action_str = serde_json::to_string_pretty(action).unwrap_or_default();
+                    let content = format!(
+                        "[Local Shell Call]\nID: {}\nStatus: {:?}\nAction: {}",
+                        id.clone().unwrap_or_default(),
+                        status,
+                        action_str
+                    );
                     let mut msg = json!({
                         "role": "assistant",
-                        "content": null,
-                        "tool_calls": [{
-                            "id": id.clone().unwrap_or_default(),
-                            "type": "local_shell_call",
-                            "status": status,
-                            "action": action,
-                        }]
+                        "content": content
                     });
                     if let Some(reasoning) = reasoning_by_anchor_index.get(&idx)
                         && let Some(obj) = msg.as_object_mut()
@@ -277,15 +374,34 @@ impl<'a> ChatRequestBuilder<'a> {
                     input,
                     status: _,
                 } => {
+                    // 检查这个 CustomToolCall 是否有对应的 CustomToolCallOutput
+                    // 注意：CustomToolCallOutput 使用 call_id，而 CustomToolCall 的 id 字段是对应的
+                    let call_id_str = id.clone().unwrap_or_default();
+                    if !call_ids_with_output.contains(&call_id_str) {
+                        // 没有对应的输出，转换为文本消息
+                        let input_str = serde_json::to_string_pretty(input).unwrap_or_default();
+                        let description = format!(
+                            "[Custom Tool Call: {name}]\nInput: {input_str}\nCall ID: {call_id_str}\n(No output recorded)"
+                        );
+                        messages.push(json!({
+                            "role": "assistant",
+                            "content": description
+                        }));
+                        continue;
+                    }
+
+                    // CustomToolCall 使用标准的 function 类型，而不是 custom 类型
+                    // 因为 OpenRouter/OpenAI 只识别 function 类型的 tool_calls
+                    let input_str = serde_json::to_string(input).unwrap_or_default();
                     messages.push(json!({
                         "role": "assistant",
                         "content": null,
                         "tool_calls": [{
                             "id": id,
-                            "type": "custom",
-                            "custom": {
+                            "type": "function",
+                            "function": {
                                 "name": name,
-                                "input": input,
+                                "arguments": input_str,
                             }
                         }]
                     }));
@@ -340,6 +456,27 @@ impl<'a> ChatRequestBuilder<'a> {
             payload["tools"] = json!(self.tools);
         }
 
+        // 🆕 为 Gemini 模型启用推理功能（OpenRouter 需要）
+        // 检测是否为 Gemini 3 模型（需要 thought_signature 支持）
+        let is_gemini_3 = self.model.contains("gemini-3")
+            || self.model.contains("gemini/gemini-3")
+            || self.model.contains("google/gemini-3");
+        if is_gemini_3 {
+            // OpenRouter 需要 reasoning 参数来启用 Gemini 的推理功能
+            // 参考: https://openrouter.ai/docs/guides/best-practices/reasoning-tokens
+            payload["reasoning"] = json!({
+                "enabled": true
+            });
+            // 同时添加 stream_options 以包含推理细节
+            payload["stream_options"] = json!({
+                "include_usage": true,
+                "include_reasoning": true
+            });
+            tracing::warn!(
+                "🧠 [ChatRequestBuilder::build] Gemini 3 模型检测到，已启用 reasoning 功能"
+            );
+        }
+
         // 🔍 DEBUG: 打印构建的请求体
         tracing::debug!(
             "📤 [ChatRequestBuilder::build] model={}, messages_count={}, tools_count={}, has_tools_in_payload={}",
@@ -349,9 +486,23 @@ impl<'a> ChatRequestBuilder<'a> {
             payload.get("tools").is_some()
         );
 
-        let mut headers = build_conversation_headers(self.conversation_id);
+        let mut headers = build_conversation_headers(self.conversation_id.clone());
         if let Some(subagent) = subagent_header(&self.session_source) {
             insert_header(&mut headers, "x-openai-subagent", &subagent);
+        }
+
+        // 🔢 添加 is_user_turn 签名 header
+        if let Some(ref conv_id) = self.conversation_id {
+            let signature = TurnSignature::sign(conv_id, self.is_user_turn);
+            insert_header(&mut headers, "x-iaterm-turn", signature.turn_value());
+            insert_header(&mut headers, "x-iaterm-turn-timestamp", &signature.timestamp.to_string());
+            insert_header(&mut headers, "x-iaterm-turn-signature", &signature.signature);
+            tracing::debug!(
+                "🔢 [ChatRequestBuilder::build] is_user_turn={}, turn={}, conv_id={}",
+                self.is_user_turn,
+                signature.turn_value(),
+                conv_id
+            );
         }
 
         Ok(ChatRequest {

@@ -14,6 +14,197 @@ use codex_git::GhostCommit;
 use codex_utils_image::error::ImageProcessingError;
 use schemars::JsonSchema;
 
+/// 反序列化必需字符串字段，支持多种格式
+///
+/// 某些 AI 模型可能发送不同格式：
+/// - 字符串格式: "ls -la" (首选)
+/// - 数组格式: ["bash", "-lc", "ls -la"] (向后兼容，会合并为字符串)
+/// - 对象格式: {"command": "ls -la"} 或 {"value": "ls -la"}
+mod string_deserializer {
+    use serde::{Deserialize, Deserializer};
+    use serde_json::Value;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<String, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+
+        match value {
+            Value::String(s) => Ok(s),
+            Value::Number(n) => Ok(n.to_string()),
+            Value::Array(arr) => {
+                // 向后兼容：数组格式会被合并为空格分隔的字符串
+                // 例如 ["bash", "-lc", "ls -la"] -> "bash -lc ls -la"
+                // 或者 ["ls", "-la"] -> "ls -la"
+                let strings: Vec<String> = arr
+                    .into_iter()
+                    .filter_map(|v| match v {
+                        Value::String(s) => Some(s),
+                        Value::Number(n) => Some(n.to_string()),
+                        _ => None,
+                    })
+                    .collect();
+
+                if strings.is_empty() {
+                    Err(serde::de::Error::custom(
+                        "command array contains no valid string elements"
+                    ))
+                } else {
+                    Ok(strings.join(" "))
+                }
+            }
+            Value::Object(obj) => {
+                // 尝试从对象中提取字符串值
+                let s = obj.get("command")
+                    .or_else(|| obj.get("cmd"))
+                    .or_else(|| obj.get("value"))
+                    .or_else(|| obj.get("text"))
+                    .or_else(|| obj.get("shell"));
+
+                match s {
+                    Some(Value::String(s)) => Ok(s.clone()),
+                    Some(Value::Number(n)) => Ok(n.to_string()),
+                    Some(Value::Array(arr)) => {
+                        // 对象内嵌套数组
+                        let strings: Vec<String> = arr
+                            .iter()
+                            .filter_map(|v| match v {
+                                Value::String(s) => Some(s.clone()),
+                                Value::Number(n) => Some(n.to_string()),
+                                _ => None,
+                            })
+                            .collect();
+
+                        if strings.is_empty() {
+                            Err(serde::de::Error::custom(
+                                "command array contains no valid string elements"
+                            ))
+                        } else {
+                            Ok(strings.join(" "))
+                        }
+                    }
+                    _ => Err(serde::de::Error::custom(
+                        "expected string value in object"
+                    ))
+                }
+            }
+            _ => Err(serde::de::Error::custom(
+                "expected string, array, or object containing string"
+            ))
+        }
+    }
+}
+
+/// 反序列化可选字符串字段，支持多种格式
+///
+/// 某些 AI 模型可能发送对象格式而不是简单字符串：
+/// - 字符串格式: "/tmp"
+/// - 对象格式: {"path": "/tmp"} 或 {"value": "/tmp"}
+mod optional_string_deserializer {
+    use serde::{Deserialize, Deserializer};
+    use serde_json::Value;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Option::<Value>::deserialize(deserializer)?;
+
+        match value {
+            None => Ok(None),
+            Some(Value::Null) => Ok(None),
+            Some(Value::String(s)) => Ok(Some(s)),
+            Some(Value::Number(n)) => Ok(Some(n.to_string())),
+            Some(Value::Object(obj)) => {
+                // 尝试从对象中提取字符串值
+                let s = obj.get("path")
+                    .or_else(|| obj.get("value"))
+                    .or_else(|| obj.get("dir"))
+                    .or_else(|| obj.get("directory"))
+                    .or_else(|| obj.get("workdir"))
+                    .or_else(|| obj.get("text"))
+                    .or_else(|| obj.get("content"))
+                    .or_else(|| obj.get("stdin"))
+                    .or_else(|| obj.get("justification"))
+                    .or_else(|| obj.get("reason"));
+
+                match s {
+                    Some(Value::String(s)) => Ok(Some(s.clone())),
+                    _ => Ok(None) // 无法提取有效字符串，返回 None
+                }
+            }
+            Some(_) => Ok(None) // 其他类型，返回 None
+        }
+    }
+}
+
+/// 反序列化可选 u64 字段，支持多种格式
+///
+/// 某些 AI 模型可能发送对象格式而不是简单数字：
+/// - 数字格式: 1000
+/// - 字符串格式: "1000"
+/// - 对象格式: {"timeout_ms": 1000} 或 {"value": 1000}
+mod optional_u64_deserializer {
+    use serde::{Deserialize, Deserializer};
+    use serde_json::Value;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Option::<Value>::deserialize(deserializer)?;
+
+        match value {
+            None => Ok(None),
+            Some(Value::Null) => Ok(None),
+            Some(Value::Number(n)) => {
+                if let Some(u) = n.as_u64() {
+                    Ok(Some(u))
+                } else if let Some(f) = n.as_f64() {
+                    Ok(Some(f as u64))
+                } else {
+                    Ok(None)
+                }
+            }
+            Some(Value::String(s)) => {
+                // 尝试解析字符串为数字
+                match s.parse::<u64>() {
+                    Ok(u) => Ok(Some(u)),
+                    Err(_) => Ok(None)
+                }
+            }
+            Some(Value::Object(obj)) => {
+                // 尝试从对象中提取数字值
+                let n = obj.get("timeout_ms")
+                    .or_else(|| obj.get("timeout"))
+                    .or_else(|| obj.get("value"))
+                    .or_else(|| obj.get("ms"));
+
+                match n {
+                    Some(Value::Number(n)) => {
+                        if let Some(u) = n.as_u64() {
+                            Ok(Some(u))
+                        } else if let Some(f) = n.as_f64() {
+                            Ok(Some(f as u64))
+                        } else {
+                            Ok(None)
+                        }
+                    }
+                    Some(Value::String(s)) => {
+                        match s.parse::<u64>() {
+                            Ok(u) => Ok(Some(u)),
+                            Err(_) => Ok(None)
+                        }
+                    }
+                    _ => Ok(None) // 无法提取有效数字，返回 None
+                }
+            }
+            Some(_) => Ok(None) // 其他类型，返回 None
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseInputItem {
@@ -84,6 +275,10 @@ pub enum ResponseItem {
         // Chat Completions + Responses API behavior.
         arguments: String,
         call_id: String,
+        /// Gemini 3 thought signature for preserving reasoning state during function calling.
+        /// Must be passed back when sending function call results to maintain model's reasoning chain.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
     },
     // NOTE: The input schema for `function_call_output` objects that clients send to the
     // OpenAI /v1/responses endpoint is NOT the same shape as the objects the server returns on the
@@ -319,20 +514,24 @@ impl From<Vec<UserInput>> for ResponseInputItem {
 
 /// If the `name` of a `ResponseItem::FunctionCall` is either `container.exec`
 /// or `shell`, the `arguments` field should deserialize to this struct.
+///
+/// Note: The `command` field now accepts a string (preferred) or array format for backward compatibility.
 #[derive(Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 pub struct ShellToolCallParams {
-    pub command: Vec<String>,
+    #[serde(deserialize_with = "string_deserializer::deserialize")]
+    pub command: String,
+    #[serde(default, deserialize_with = "optional_string_deserializer::deserialize")]
     pub workdir: Option<String>,
 
     /// This is the maximum time in milliseconds that the command is allowed to run.
-    #[serde(alias = "timeout")]
+    #[serde(alias = "timeout", default, deserialize_with = "optional_u64_deserializer::deserialize")]
     pub timeout_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub with_escalated_permissions: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "optional_string_deserializer::deserialize")]
     pub justification: Option<String>,
     /// Optional stdin content to pass to the command
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "optional_string_deserializer::deserialize")]
     pub stdin: Option<String>,
 }
 
@@ -340,18 +539,20 @@ pub struct ShellToolCallParams {
 /// `arguments` field should deserialize to this struct.
 #[derive(Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 pub struct ShellCommandToolCallParams {
+    #[serde(deserialize_with = "string_deserializer::deserialize")]
     pub command: String,
+    #[serde(default, deserialize_with = "optional_string_deserializer::deserialize")]
     pub workdir: Option<String>,
 
     /// Whether to run the shell with login shell semantics
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login: Option<bool>,
     /// This is the maximum time in milliseconds that the command is allowed to run.
-    #[serde(alias = "timeout")]
+    #[serde(alias = "timeout", default, deserialize_with = "optional_u64_deserializer::deserialize")]
     pub timeout_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub with_escalated_permissions: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "optional_string_deserializer::deserialize")]
     pub justification: Option<String>,
 }
 
@@ -733,6 +934,7 @@ mod tests {
 
     #[test]
     fn deserialize_shell_tool_call_params() -> Result<()> {
+        // Test array format - will be joined with spaces
         let json = r#"{
             "command": ["ls", "-l"],
             "workdir": "/tmp",
@@ -742,12 +944,56 @@ mod tests {
         let params: ShellToolCallParams = serde_json::from_str(json)?;
         assert_eq!(
             ShellToolCallParams {
-                command: vec!["ls".to_string(), "-l".to_string()],
+                command: "ls -l".to_string(),
                 workdir: Some("/tmp".to_string()),
                 timeout_ms: Some(1000),
                 with_escalated_permissions: None,
                 justification: None,
                 stdin: None,
+            },
+            params
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn deserialize_shell_tool_call_params_minimal() -> Result<()> {
+        // Test that only the required `command` field is needed (array format)
+        let json = r#"{
+            "command": ["echo", "hello"]
+        }"#;
+
+        let params: ShellToolCallParams = serde_json::from_str(json)?;
+        assert_eq!(
+            ShellToolCallParams {
+                command: "echo hello".to_string(),
+                workdir: None,
+                timeout_ms: None,
+                with_escalated_permissions: None,
+                justification: None,
+                stdin: None,
+            },
+            params
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn deserialize_shell_command_tool_call_params_minimal() -> Result<()> {
+        // Test that only the required `command` field is needed
+        let json = r#"{
+            "command": "echo hello"
+        }"#;
+
+        let params: ShellCommandToolCallParams = serde_json::from_str(json)?;
+        assert_eq!(
+            ShellCommandToolCallParams {
+                command: "echo hello".to_string(),
+                workdir: None,
+                login: None,
+                timeout_ms: None,
+                with_escalated_permissions: None,
+                justification: None,
             },
             params
         );
@@ -849,6 +1095,58 @@ mod tests {
             other => panic!("expected message response but got {other:?}"),
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn deserialize_shell_command_with_object_command() -> Result<()> {
+        // Test that command field can be an object containing the actual command
+        let json = r#"{
+            "command": {"command": "echo hello", "extra": "ignored"}
+        }"#;
+
+        let params: ShellCommandToolCallParams = serde_json::from_str(json)?;
+        assert_eq!(params.command, "echo hello");
+        Ok(())
+    }
+
+    #[test]
+    fn deserialize_shell_command_with_object_workdir() -> Result<()> {
+        // Test that workdir field can be an object containing the path
+        let json = r#"{
+            "command": "ls",
+            "workdir": {"path": "/tmp", "extra": "ignored"}
+        }"#;
+
+        let params: ShellCommandToolCallParams = serde_json::from_str(json)?;
+        assert_eq!(params.command, "ls");
+        assert_eq!(params.workdir, Some("/tmp".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn deserialize_shell_with_object_justification() -> Result<()> {
+        // Test that justification field can be an object containing the text
+        let json = r#"{
+            "command": ["ls", "-la"],
+            "justification": {"text": "Need to list files", "extra": "ignored"}
+        }"#;
+
+        let params: ShellToolCallParams = serde_json::from_str(json)?;
+        assert_eq!(params.justification, Some("Need to list files".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn deserialize_shell_with_object_stdin() -> Result<()> {
+        // Test that stdin field can be an object containing the content
+        let json = r#"{
+            "command": ["cat"],
+            "stdin": {"content": "hello world", "extra": "ignored"}
+        }"#;
+
+        let params: ShellToolCallParams = serde_json::from_str(json)?;
+        assert_eq!(params.stdin, Some("hello world".to_string()));
         Ok(())
     }
 }

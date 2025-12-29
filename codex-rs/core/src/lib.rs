@@ -22,6 +22,10 @@ pub mod config_loader;
 mod context_manager;
 pub mod custom_prompts;
 mod environment_context;
+
+// Layered prompts and A/B testing
+pub mod layered_prompts;
+pub mod ab_testing;
 pub mod error;
 pub mod exec;
 pub mod exec_env;
@@ -42,6 +46,7 @@ mod model_provider_info;
 pub mod parse_command;
 pub mod powershell;
 pub mod sandboxing;
+pub mod shell_utils;
 mod stream_events_utils;
 mod text_encoding;
 pub mod token_data;

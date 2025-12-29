@@ -11,6 +11,7 @@ use crate::client_common::tools::ToolSpec;
 use crate::codex::Session;
 use crate::codex::TurnContext;
 use crate::function_tool::FunctionCallError;
+use crate::shell_utils::parse_json_with_recovery;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
@@ -62,12 +63,30 @@ impl ToolHandler for ApplyPatchHandler {
 
         let patch_input = match payload {
             ToolPayload::Function { arguments } => {
-                let args: ApplyPatchToolArgs = serde_json::from_str(&arguments).map_err(|e| {
-                    FunctionCallError::RespondToModel(format!(
-                        "failed to parse function arguments: {e:?}"
-                    ))
-                })?;
-                args.input
+                // 尝试解析为 JSON 对象
+                match parse_json_with_recovery::<ApplyPatchToolArgs>(&arguments) {
+                    Ok(args) => args.input,
+                    Err(_) => {
+                        // 如果解析失败，检查是否是原始 patch 内容
+                        // 例如模型直接发送了 patch 文本而不是 JSON 对象
+                        let trimmed = arguments.trim();
+                        if trimmed.starts_with("***") || trimmed.starts_with("---") || trimmed.starts_with("diff ") {
+                            // 这看起来像是直接的 patch 内容
+                            tracing::warn!("apply_patch 收到原始 patch 内容而非 JSON，直接使用");
+                            arguments
+                        } else {
+                            // 尝试作为单一字符串值解析
+                            match serde_json::from_str::<String>(&arguments) {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    return Err(FunctionCallError::RespondToModel(format!(
+                                        "failed to parse function arguments: {e:?}"
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                }
             }
             ToolPayload::Custom { input } => input,
             _ => {

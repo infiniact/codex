@@ -311,10 +311,17 @@ pub struct UsageLimitReachedError {
     pub(crate) plan_type: Option<PlanType>,
     pub(crate) resets_at: Option<DateTime<Utc>>,
     pub(crate) rate_limits: Option<RateLimitSnapshot>,
+    /// 自定义错误消息（来自 IAAccount 等服务的原始消息）
+    pub(crate) custom_message: Option<String>,
 }
 
 impl std::fmt::Display for UsageLimitReachedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // 如果有自定义消息，优先使用
+        if let Some(ref msg) = self.custom_message {
+            return write!(f, "{msg}");
+        }
+
         let message = match self.plan_type.as_ref() {
             Some(PlanType::Known(KnownPlan::Plus)) => format!(
                 "You've hit your usage limit. Upgrade to Pro (https://openai.com/chatgpt/pricing), visit chatgpt.com/codex/settings/usage to purchase more credits{}",
@@ -579,6 +586,7 @@ mod tests {
             plan_type: Some(PlanType::Known(KnownPlan::Plus)),
             resets_at: None,
             rate_limits: Some(rate_limit_snapshot()),
+            custom_message: None,
         };
         assert_eq!(
             err.to_string(),
@@ -686,6 +694,7 @@ mod tests {
             plan_type: Some(PlanType::Known(KnownPlan::Free)),
             resets_at: None,
             rate_limits: Some(rate_limit_snapshot()),
+            custom_message: None,
         };
         assert_eq!(
             err.to_string(),
@@ -699,6 +708,7 @@ mod tests {
             plan_type: None,
             resets_at: None,
             rate_limits: Some(rate_limit_snapshot()),
+            custom_message: None,
         };
         assert_eq!(
             err.to_string(),
@@ -716,6 +726,7 @@ mod tests {
                 plan_type: Some(PlanType::Known(KnownPlan::Team)),
                 resets_at: Some(resets_at),
                 rate_limits: Some(rate_limit_snapshot()),
+            custom_message: None,
             };
             let expected = format!(
                 "You've hit your usage limit. To get more access now, send a request to your admin or try again at {expected_time}."
@@ -730,6 +741,7 @@ mod tests {
             plan_type: Some(PlanType::Known(KnownPlan::Business)),
             resets_at: None,
             rate_limits: Some(rate_limit_snapshot()),
+            custom_message: None,
         };
         assert_eq!(
             err.to_string(),
@@ -743,6 +755,7 @@ mod tests {
             plan_type: Some(PlanType::Known(KnownPlan::Enterprise)),
             resets_at: None,
             rate_limits: Some(rate_limit_snapshot()),
+            custom_message: None,
         };
         assert_eq!(
             err.to_string(),
@@ -760,6 +773,7 @@ mod tests {
                 plan_type: Some(PlanType::Known(KnownPlan::Pro)),
                 resets_at: Some(resets_at),
                 rate_limits: Some(rate_limit_snapshot()),
+            custom_message: None,
             };
             let expected = format!(
                 "You've hit your usage limit. Visit chatgpt.com/codex/settings/usage to purchase more credits or try again at {expected_time}."
@@ -778,6 +792,7 @@ mod tests {
                 plan_type: None,
                 resets_at: Some(resets_at),
                 rate_limits: Some(rate_limit_snapshot()),
+            custom_message: None,
             };
             let expected = format!("You've hit your usage limit. Try again at {expected_time}.");
             assert_eq!(err.to_string(), expected);
@@ -823,6 +838,7 @@ mod tests {
                 plan_type: Some(PlanType::Known(KnownPlan::Plus)),
                 resets_at: Some(resets_at),
                 rate_limits: Some(rate_limit_snapshot()),
+            custom_message: None,
             };
             let expected = format!(
                 "You've hit your usage limit. Upgrade to Pro (https://openai.com/chatgpt/pricing), visit chatgpt.com/codex/settings/usage to purchase more credits or try again at {expected_time}."
@@ -842,6 +858,7 @@ mod tests {
                 plan_type: None,
                 resets_at: Some(resets_at),
                 rate_limits: Some(rate_limit_snapshot()),
+            custom_message: None,
             };
             let expected = format!("You've hit your usage limit. Try again at {expected_time}.");
             assert_eq!(err.to_string(), expected);
@@ -858,6 +875,7 @@ mod tests {
                 plan_type: None,
                 resets_at: Some(resets_at),
                 rate_limits: Some(rate_limit_snapshot()),
+            custom_message: None,
             };
             let expected = format!("You've hit your usage limit. Try again at {expected_time}.");
             assert_eq!(err.to_string(), expected);

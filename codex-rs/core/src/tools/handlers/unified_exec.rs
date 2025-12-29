@@ -5,6 +5,7 @@ use crate::protocol::ExecCommandSource;
 use crate::protocol::TerminalInteractionEvent;
 use crate::shell::Shell;
 use crate::shell::get_shell_by_model_provided_path;
+use crate::shell_utils::parse_json_with_recovery;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
@@ -21,17 +22,76 @@ use crate::unified_exec::UnifiedExecSessionManager;
 use crate::unified_exec::WriteStdinRequest;
 use async_trait::async_trait;
 use serde::Deserialize;
+use serde::Deserializer;
+use serde_json::Value as JsonValue;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 pub struct UnifiedExecHandler;
 
+/// Deserialize string field, supporting both string and object formats
+fn deserialize_cmd_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = JsonValue::deserialize(deserializer)?;
+
+    match value {
+        JsonValue::String(s) => Ok(s),
+        JsonValue::Object(obj) => {
+            let s = obj.get("cmd")
+                .or_else(|| obj.get("command"))
+                .or_else(|| obj.get("value"))
+                .or_else(|| obj.get("text"))
+                .or_else(|| obj.get("shell"));
+
+            match s {
+                Some(JsonValue::String(s)) => Ok(s.clone()),
+                _ => Err(serde::de::Error::custom(
+                    "expected string value in object"
+                ))
+            }
+        }
+        _ => Err(serde::de::Error::custom(
+            "expected string or object containing string"
+        ))
+    }
+}
+
+/// Deserialize optional string field, supporting both string and object formats
+fn deserialize_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<JsonValue>::deserialize(deserializer)?;
+
+    match value {
+        None => Ok(None),
+        Some(JsonValue::Null) => Ok(None),
+        Some(JsonValue::String(s)) => Ok(Some(s)),
+        Some(JsonValue::Object(obj)) => {
+            let s = obj.get("path")
+                .or_else(|| obj.get("value"))
+                .or_else(|| obj.get("dir"))
+                .or_else(|| obj.get("workdir"))
+                .or_else(|| obj.get("shell"));
+
+            match s {
+                Some(JsonValue::String(s)) => Ok(Some(s.clone())),
+                _ => Ok(None)
+            }
+        }
+        Some(_) => Ok(None)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ExecCommandArgs {
+    #[serde(deserialize_with = "deserialize_cmd_string")]
     cmd: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     workdir: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     shell: Option<String>,
     #[serde(default)]
     login: Option<bool>,
@@ -41,7 +101,7 @@ struct ExecCommandArgs {
     max_output_tokens: Option<usize>,
     #[serde(default)]
     with_escalated_permissions: Option<bool>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     justification: Option<String>,
 }
 
@@ -49,7 +109,7 @@ struct ExecCommandArgs {
 struct WriteStdinArgs {
     // The model is trained on `session_id`.
     session_id: i32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_cmd_string")]
     chars: String,
     #[serde(default = "default_write_stdin_yield_time_ms")]
     yield_time_ms: u64,
@@ -85,7 +145,7 @@ impl ToolHandler for UnifiedExecHandler {
             return true;
         };
 
-        let Ok(params) = serde_json::from_str::<ExecCommandArgs>(arguments) else {
+        let Ok(params) = parse_json_with_recovery::<ExecCommandArgs>(arguments) else {
             return true;
         };
         let command = get_command(&params, invocation.session.user_shell());
@@ -118,7 +178,7 @@ impl ToolHandler for UnifiedExecHandler {
 
         let response = match tool_name.as_str() {
             "exec_command" => {
-                let args: ExecCommandArgs = serde_json::from_str(&arguments).map_err(|err| {
+                let args: ExecCommandArgs = parse_json_with_recovery(&arguments).map_err(|err| {
                     FunctionCallError::RespondToModel(format!(
                         "failed to parse exec_command arguments: {err:?}"
                     ))
@@ -211,7 +271,7 @@ impl ToolHandler for UnifiedExecHandler {
                     })?
             }
             "write_stdin" => {
-                let args: WriteStdinArgs = serde_json::from_str(&arguments).map_err(|err| {
+                let args: WriteStdinArgs = parse_json_with_recovery(&arguments).map_err(|err| {
                     FunctionCallError::RespondToModel(format!(
                         "failed to parse write_stdin arguments: {err:?}"
                     ))

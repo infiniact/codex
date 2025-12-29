@@ -153,6 +153,7 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
             model: REMOTE_MODEL_SLUG.to_string(),
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 
@@ -256,6 +257,7 @@ async fn remote_models_apply_remote_base_instructions() -> Result<()> {
             model: model.to_string(),
             effort: None,
             summary: ReasoningSummary::Auto,
+            is_user_turn: true,
         })
         .await?;
 
