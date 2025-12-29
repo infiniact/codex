@@ -100,7 +100,7 @@ impl<'a> ChatRequestBuilder<'a> {
                 ResponseItem::CustomToolCallOutput { .. } => {}
                 ResponseItem::WebSearchCall { .. } => {}
                 ResponseItem::GhostSnapshot { .. } => {}
-                ResponseItem::CompactionSummary { .. } => {}
+                ResponseItem::Compaction { .. } => {}
             }
         }
 
@@ -419,7 +419,7 @@ impl<'a> ChatRequestBuilder<'a> {
                 ResponseItem::Reasoning { .. }
                 | ResponseItem::WebSearchCall { .. }
                 | ResponseItem::Other
-                | ResponseItem::CompactionSummary { .. } => {
+                | ResponseItem::Compaction { .. } => {
                     continue;
                 }
             }

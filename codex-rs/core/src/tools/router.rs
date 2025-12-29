@@ -1,10 +1,8 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use crate::client_common::tools::ToolSpec;
 use crate::codex::Session;
 use crate::codex::TurnContext;
 use crate::function_tool::FunctionCallError;
+use crate::sandboxing::SandboxPermissions;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
@@ -16,8 +14,11 @@ use codex_protocol::models::LocalShellAction;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::ShellToolCallParams;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tracing::instrument;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ToolCall {
     pub tool_name: String,
     pub call_id: String,
@@ -144,6 +145,7 @@ impl ToolRouter {
             .any(|config| config.spec.name() == tool_name)
     }
 
+    #[instrument(level = "trace", skip_all, err)]
     pub async fn build_tool_call(
         session: &Session,
         item: ResponseItem,
@@ -166,15 +168,10 @@ impl ToolRouter {
                         },
                     }))
                 } else {
-                    let payload = if name == "unified_exec" {
-                        ToolPayload::UnifiedExec { arguments }
-                    } else {
-                        ToolPayload::Function { arguments }
-                    };
                     Ok(Some(ToolCall {
                         tool_name: name,
                         call_id,
-                        payload,
+                        payload: ToolPayload::Function { arguments },
                     }))
                 }
             }
@@ -205,7 +202,7 @@ impl ToolRouter {
                             command: exec.command.join(" "),
                             workdir: exec.working_directory,
                             timeout_ms: exec.timeout_ms,
-                            with_escalated_permissions: None,
+                            sandbox_permissions: Some(SandboxPermissions::UseDefault),
                             justification: None,
                             stdin: None,
                         };
@@ -221,6 +218,7 @@ impl ToolRouter {
         }
     }
 
+    #[instrument(level = "trace", skip_all, err)]
     pub async fn dispatch_tool_call(
         &self,
         session: Arc<Session>,

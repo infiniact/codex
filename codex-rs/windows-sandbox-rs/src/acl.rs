@@ -9,7 +9,6 @@ use windows_sys::Win32::Foundation::ERROR_SUCCESS;
 use windows_sys::Win32::Foundation::HLOCAL;
 use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
 use windows_sys::Win32::Security::AclSizeInformation;
-use windows_sys::Win32::Security::Authorization::GetEffectiveRightsFromAclW;
 use windows_sys::Win32::Security::Authorization::GetNamedSecurityInfoW;
 use windows_sys::Win32::Security::Authorization::GetSecurityInfo;
 use windows_sys::Win32::Security::Authorization::SetEntriesInAclW;
@@ -34,6 +33,7 @@ use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
 use windows_sys::Win32::Storage::FileSystem::FILE_APPEND_DATA;
 use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
 use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+use windows_sys::Win32::Storage::FileSystem::FILE_DELETE_CHILD;
 use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_EXECUTE;
 use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
 use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_WRITE;
@@ -45,12 +45,16 @@ use windows_sys::Win32::Storage::FileSystem::FILE_WRITE_DATA;
 use windows_sys::Win32::Storage::FileSystem::FILE_WRITE_EA;
 use windows_sys::Win32::Storage::FileSystem::OPEN_EXISTING;
 use windows_sys::Win32::Storage::FileSystem::READ_CONTROL;
+use windows_sys::Win32::Storage::FileSystem::DELETE;
 const SE_KERNEL_OBJECT: u32 = 6;
 const INHERIT_ONLY_ACE: u8 = 0x08;
 const GENERIC_WRITE_MASK: u32 = 0x4000_0000;
 const DENY_ACCESS: i32 = 3;
 
 /// Fetch DACL via handle-based query; caller must LocalFree the returned SD.
+///
+/// # Safety
+/// Caller must free the returned security descriptor with `LocalFree` and pass an existing path.
 pub unsafe fn fetch_dacl_handle(path: &Path) -> Result<(*mut ACL, *mut c_void)> {
     let wpath = to_wide(path);
     let h = CreateFileW(
@@ -88,11 +92,13 @@ pub unsafe fn fetch_dacl_handle(path: &Path) -> Result<(*mut ACL, *mut c_void)> 
     Ok((p_dacl, p_sd))
 }
 
-/// Fast mask-based check: does any ACE for provided SIDs grant at least one desired bit? Skips inherit-only.
-pub unsafe fn dacl_quick_mask_allows(
+/// Fast mask-based check: does an ACE for provided SIDs grant the desired mask? Skips inherit-only.
+/// When `require_all_bits` is true, all bits in `desired_mask` must be present; otherwise any bit suffices.
+pub unsafe fn dacl_mask_allows(
     p_dacl: *mut ACL,
     psids: &[*mut c_void],
     desired_mask: u32,
+    require_all_bits: bool,
 ) -> bool {
     if p_dacl.is_null() {
         return false;
@@ -141,22 +147,25 @@ pub unsafe fn dacl_quick_mask_allows(
         let ace = &*(p_ace as *const ACCESS_ALLOWED_ACE);
         let mut mask = ace.Mask;
         MapGenericMask(&mut mask, &mapping);
-        if (mask & desired_mask) != 0 {
+        if (require_all_bits && (mask & desired_mask) == desired_mask)
+            || (!require_all_bits && (mask & desired_mask) != 0)
+        {
             return true;
         }
     }
     false
 }
 
-/// Path-based wrapper around the quick mask check (single DACL fetch).
-pub fn path_quick_mask_allows(
+/// Path-based wrapper around the mask check (single DACL fetch).
+pub fn path_mask_allows(
     path: &Path,
     psids: &[*mut c_void],
     desired_mask: u32,
+    require_all_bits: bool,
 ) -> Result<bool> {
     unsafe {
         let (p_dacl, sd) = fetch_dacl_handle(path)?;
-        let has = dacl_quick_mask_allows(p_dacl, psids, desired_mask);
+        let has = dacl_mask_allows(p_dacl, psids, desired_mask, require_all_bits);
         if !sd.is_null() {
             LocalFree(sd as HLOCAL);
         }
@@ -248,100 +257,29 @@ pub unsafe fn dacl_has_write_deny_for_sid(p_dacl: *mut ACL, psid: *mut c_void) -
     false
 }
 
-// Compute effective rights for a trustee SID against a DACL and decide if write is effectively allowed.
-// This accounts for deny ACEs and ordering; falls back to a conservative per-ACE scan if the API fails.
-#[allow(dead_code)]
-pub unsafe fn dacl_effective_allows_write(p_dacl: *mut ACL, psid: *mut c_void) -> bool {
-    if p_dacl.is_null() {
-        return false;
-    }
-    let trustee = TRUSTEE_W {
-        pMultipleTrustee: std::ptr::null_mut(),
-        MultipleTrusteeOperation: 0,
-        TrusteeForm: TRUSTEE_IS_SID,
-        TrusteeType: TRUSTEE_IS_UNKNOWN,
-        ptstrName: psid as *mut u16,
-    };
-    let mut access: u32 = 0;
-    let ok = GetEffectiveRightsFromAclW(p_dacl, &trustee, &mut access);
-    if ok == ERROR_SUCCESS {
-        // Map generic bits to avoid “missing” write when generic permissions are present.
-        let mut mapped_access = access;
-        if (access & GENERIC_WRITE_MASK) != 0 {
-            mapped_access |= FILE_GENERIC_WRITE | FILE_WRITE_DATA | FILE_APPEND_DATA;
-        }
-        if (access & READ_CONTROL) != 0 {
-            mapped_access |= FILE_GENERIC_READ;
-        }
-        let write_bits = FILE_GENERIC_WRITE
-            | FILE_WRITE_DATA
-            | FILE_APPEND_DATA
-            | FILE_WRITE_EA
-            | FILE_WRITE_ATTRIBUTES;
-        return (mapped_access & write_bits) != 0;
-    }
-    // Fallback: simple allow ACE scan (already ignores inherit-only)
-    dacl_has_write_allow_for_sid(p_dacl, psid)
-}
+const WRITE_ALLOW_MASK: u32 = FILE_GENERIC_READ
+    | FILE_GENERIC_WRITE
+    | FILE_GENERIC_EXECUTE
+    | DELETE
+    | FILE_DELETE_CHILD;
 
-#[allow(dead_code)]
-pub unsafe fn dacl_effective_allows_mask(
-    p_dacl: *mut ACL,
-    psid: *mut c_void,
-    desired_mask: u32,
-) -> bool {
-    if p_dacl.is_null() {
-        return false;
-    }
-    use windows_sys::Win32::Security::Authorization::GetEffectiveRightsFromAclW;
-    use windows_sys::Win32::Security::Authorization::TRUSTEE_IS_SID;
-    use windows_sys::Win32::Security::Authorization::TRUSTEE_IS_UNKNOWN;
-    use windows_sys::Win32::Security::Authorization::TRUSTEE_W;
 
-    let trustee = TRUSTEE_W {
-        pMultipleTrustee: std::ptr::null_mut(),
-        MultipleTrusteeOperation: 0,
-        TrusteeForm: TRUSTEE_IS_SID,
-        TrusteeType: TRUSTEE_IS_UNKNOWN,
-        ptstrName: psid as *mut u16,
-    };
-    let mut access: u32 = 0;
-    let ok = GetEffectiveRightsFromAclW(p_dacl, &trustee, &mut access);
-    if ok == ERROR_SUCCESS {
-        // Map generic bits to avoid “missing” when generic permissions are present.
-        let mut mapped_access = access;
-        if (access & GENERIC_WRITE_MASK) != 0 {
-            mapped_access |= FILE_GENERIC_WRITE | FILE_WRITE_DATA | FILE_APPEND_DATA;
-        }
-        if (access & READ_CONTROL) != 0 {
-            mapped_access |= FILE_GENERIC_READ;
-        }
-        return (mapped_access & desired_mask) == desired_mask;
-    }
-    // Fallbacks on error: if write bits are requested, reuse the write helper; otherwise fail closed.
-    if (desired_mask & FILE_GENERIC_WRITE) != 0 {
-        return dacl_effective_allows_write(p_dacl, psid);
-    }
-    false
-}
-
-#[allow(dead_code)]
-const WRITE_ALLOW_MASK: u32 = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE;
-
-/// Ensure all provided SIDs have a write-capable allow ACE on the path.
-/// Returns true if any ACE was added.
-#[allow(dead_code)]
-pub unsafe fn ensure_allow_write_aces(path: &Path, sids: &[*mut c_void]) -> Result<bool> {
+unsafe fn ensure_allow_mask_aces_with_inheritance_impl(
+    path: &Path,
+    sids: &[*mut c_void],
+    allow_mask: u32,
+    inheritance: u32,
+) -> Result<bool> {
     let (p_dacl, p_sd) = fetch_dacl_handle(path)?;
     let mut entries: Vec<EXPLICIT_ACCESS_W> = Vec::new();
     for sid in sids {
-        if dacl_quick_mask_allows(p_dacl, &[*sid], WRITE_ALLOW_MASK) {
+        if dacl_mask_allows(p_dacl, &[*sid], allow_mask, true) {
             continue;
         }
         entries.push(EXPLICIT_ACCESS_W {
-            grfAccessPermissions: WRITE_ALLOW_MASK,
+            grfAccessPermissions: allow_mask,
             grfAccessMode: 2, // SET_ACCESS
-            grfInheritance: CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE,
+            grfInheritance: inheritance,
             Trustee: TRUSTEE_W {
                 pMultipleTrustee: std::ptr::null_mut(),
                 MultipleTrusteeOperation: 0,
@@ -372,6 +310,9 @@ pub unsafe fn ensure_allow_write_aces(path: &Path, sids: &[*mut c_void]) -> Resu
             );
             if code3 == ERROR_SUCCESS {
                 added = true;
+                if !p_new_dacl.is_null() {
+                    LocalFree(p_new_dacl as HLOCAL);
+                }
             } else {
                 if !p_new_dacl.is_null() {
                     LocalFree(p_new_dacl as HLOCAL);
@@ -380,9 +321,6 @@ pub unsafe fn ensure_allow_write_aces(path: &Path, sids: &[*mut c_void]) -> Resu
                     LocalFree(p_sd as HLOCAL);
                 }
                 return Err(anyhow!("SetNamedSecurityInfoW failed: {}", code3));
-            }
-            if !p_new_dacl.is_null() {
-                LocalFree(p_new_dacl as HLOCAL);
             }
         } else {
             if !p_sd.is_null() {
@@ -395,6 +333,47 @@ pub unsafe fn ensure_allow_write_aces(path: &Path, sids: &[*mut c_void]) -> Resu
         LocalFree(p_sd as HLOCAL);
     }
     Ok(added)
+}
+
+/// Ensure all provided SIDs have an allow ACE with the requested mask on the path.
+/// Returns true if any ACE was added.
+///
+/// # Safety
+/// Caller must pass valid SID pointers and an existing path; free the returned security descriptor with `LocalFree`.
+pub unsafe fn ensure_allow_mask_aces_with_inheritance(
+    path: &Path,
+    sids: &[*mut c_void],
+    allow_mask: u32,
+    inheritance: u32,
+) -> Result<bool> {
+    ensure_allow_mask_aces_with_inheritance_impl(path, sids, allow_mask, inheritance)
+}
+
+/// Ensure all provided SIDs have an allow ACE with the requested mask on the path.
+/// Returns true if any ACE was added.
+///
+/// # Safety
+/// Caller must pass valid SID pointers and an existing path; free the returned security descriptor with `LocalFree`.
+pub unsafe fn ensure_allow_mask_aces(
+    path: &Path,
+    sids: &[*mut c_void],
+    allow_mask: u32,
+) -> Result<bool> {
+    ensure_allow_mask_aces_with_inheritance(
+        path,
+        sids,
+        allow_mask,
+        CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE,
+    )
+}
+
+/// Ensure all provided SIDs have a write-capable allow ACE on the path.
+/// Returns true if any ACE was added.
+///
+/// # Safety
+/// Caller must pass valid SID pointers and an existing path; free the returned security descriptor with `LocalFree`.
+pub unsafe fn ensure_allow_write_aces(path: &Path, sids: &[*mut c_void]) -> Result<bool> {
+    ensure_allow_mask_aces(path, sids, WRITE_ALLOW_MASK)
 }
 
 /// Adds an allow ACE granting read/write/execute to the given SID on the target path.

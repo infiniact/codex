@@ -10,7 +10,6 @@ use std::time::UNIX_EPOCH;
 
 use codex_core::config::types::McpServerConfig;
 use codex_core::config::types::McpServerTransportConfig;
-use codex_core::features::Feature;
 
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::EventMsg;
@@ -79,7 +78,6 @@ async fn stdio_server_round_trip() -> anyhow::Result<()> {
 
     let fixture = test_codex()
         .with_config(move |config| {
-            config.features.enable(Feature::RmcpClient);
             config.mcp_servers.insert(
                 server_name.to_string(),
                 McpServerConfig {
@@ -220,7 +218,6 @@ async fn stdio_image_responses_round_trip() -> anyhow::Result<()> {
 
     let fixture = test_codex()
         .with_config(move |config| {
-            config.features.enable(Feature::RmcpClient);
             config.mcp_servers.insert(
                 server_name.to_string(),
                 McpServerConfig {
@@ -419,7 +416,6 @@ async fn stdio_image_completions_round_trip() -> anyhow::Result<()> {
     let fixture = test_codex()
         .with_config(move |config| {
             config.model_provider.wire_api = codex_core::WireApi::Chat;
-            config.features.enable(Feature::RmcpClient);
             config.mcp_servers.insert(
                 server_name.to_string(),
                 McpServerConfig {
@@ -496,9 +492,13 @@ async fn stdio_image_completions_round_trip() -> anyhow::Result<()> {
 
     // Chat Completions assertion: the second POST should include a tool role message
     // with an array `content` containing an item with the expected data URL.
-    let requests = server.received_requests().await.expect("requests captured");
+    let all_requests = server.received_requests().await.expect("requests captured");
+    let requests: Vec<_> = all_requests
+        .iter()
+        .filter(|req| req.method == "POST" && req.url.path().ends_with("/chat/completions"))
+        .collect();
     assert!(requests.len() >= 2, "expected two chat completion calls");
-    let second = &requests[1];
+    let second = requests[1];
     let body: Value = serde_json::from_slice(&second.body)?;
     let messages = body
         .get("messages")
@@ -565,7 +565,6 @@ async fn stdio_server_propagates_whitelisted_env_vars() -> anyhow::Result<()> {
 
     let fixture = test_codex()
         .with_config(move |config| {
-            config.features.enable(Feature::RmcpClient);
             config.mcp_servers.insert(
                 server_name.to_string(),
                 McpServerConfig {
@@ -718,7 +717,6 @@ async fn streamable_http_tool_call_round_trip() -> anyhow::Result<()> {
 
     let fixture = test_codex()
         .with_config(move |config| {
-            config.features.enable(Feature::RmcpClient);
             config.mcp_servers.insert(
                 server_name.to_string(),
                 McpServerConfig {
@@ -902,7 +900,6 @@ async fn streamable_http_with_oauth_round_trip() -> anyhow::Result<()> {
 
     let fixture = test_codex()
         .with_config(move |config| {
-            config.features.enable(Feature::RmcpClient);
             config.mcp_servers.insert(
                 server_name.to_string(),
                 McpServerConfig {

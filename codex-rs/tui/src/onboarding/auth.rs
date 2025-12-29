@@ -222,7 +222,7 @@ impl AuthModeWidget {
         };
 
         let chatgpt_description = if self.is_chatgpt_login_allowed() {
-            "Usage included with Plus, Pro, Team, and Enterprise plans"
+            "Usage included with Plus, Pro, Business, Education, and Enterprise plans"
         } else {
             "ChatGPT login is disabled"
         };
